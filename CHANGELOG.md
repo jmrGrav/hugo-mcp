@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.1] — 2026-05-03
+
+### Fixed
+- `tools/call` responses now wrapped in MCP content format `{"content": [{"type": "text", "text": "..."}]}` as required by the MCP spec — Claude.ai was rejecting raw dict results with "Error occurred during tool execution"
+- Tool-level errors return `isError: true` in content instead of JSON-RPC protocol errors
+
 ## [1.0.0] — 2026-05-03
 
 ### Added
