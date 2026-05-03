@@ -6,7 +6,7 @@ Gère les pages Hugo depuis Claude.ai
 
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
-import subprocess, os, glob, yaml
+import subprocess, os, glob, yaml, json
 from pathlib import Path
 from datetime import datetime
 import httpx
@@ -237,7 +237,11 @@ async def handle_tool_call(params):
     tool = tools.get(tool_name)
     if not tool:
         raise HTTPException(404, f"Tool not found: {tool_name}")
-    return await tool(args)
+    try:
+        result = await tool(args)
+        return {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]}
+    except HTTPException as e:
+        return {"content": [{"type": "text", "text": e.detail}], "isError": True}
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
