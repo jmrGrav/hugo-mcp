@@ -6,11 +6,17 @@ Gère les pages Hugo depuis Claude.ai
 
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
-import subprocess, os, glob, yaml, json
+import subprocess, os, glob, yaml, json, logging, traceback
 from pathlib import Path
 from datetime import datetime
 import httpx
 from dotenv import load_dotenv
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+log = logging.getLogger("hugo-mcp")
 
 load_dotenv()
 
@@ -58,6 +64,7 @@ async def purge_cloudflare(paths: list[str] = None):
         return resp.json()
 
 def read_frontmatter(filepath: str):
+    # OSError / PermissionError propagate intentionally — callers skip the file
     with open(filepath, 'r', encoding='utf-8') as f:
         content = f.read()
 
@@ -69,8 +76,11 @@ def read_frontmatter(filepath: str):
         return {}, content
 
     try:
-        fm = yaml.safe_load(parts[1]) or {}
-    except Exception:
+        fm = yaml.safe_load(parts[1])
+        if not isinstance(fm, dict):
+            fm = {}
+    except yaml.YAMLError as e:
+        log.warning("frontmatter_invalid file=%s error=%s", filepath, e)
         fm = {}
 
     return fm, parts[2].strip()
@@ -241,7 +251,11 @@ async def handle_tool_call(params):
         result = await tool(args)
         return {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]}
     except HTTPException as e:
+        log.warning("tool_error tool=%s http=%s detail=%s", tool_name, e.status_code, e.detail)
         return {"content": [{"type": "text", "text": e.detail}], "isError": True}
+    except Exception as e:
+        log.error("tool_error tool=%s error=%s\n%s", tool_name, e, traceback.format_exc())
+        return {"content": [{"type": "text", "text": f"{type(e).__name__}: {e}"}], "isError": True}
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
@@ -249,18 +263,35 @@ async def tool_list_pages(args):
     lang    = args.get("lang")
     section = args.get("section")
     pages   = []
+    skipped = 0
 
-    for filepath in glob.glob(f"{CONTENT_DIR}/**/*.md", recursive=True):
-        if os.path.basename(filepath).startswith('_'):
+    content_path = Path(CONTENT_DIR)
+    if not content_path.exists():
+        log.warning("list_pages: CONTENT_DIR absent: %s", CONTENT_DIR)
+        return {"pages": [], "total": 0}
+
+    try:
+        md_files = list(content_path.rglob("*.md"))
+    except (PermissionError, OSError) as e:
+        log.error("list_pages: walk failed: %s", e)
+        return {"pages": [], "total": 0, "error": str(e)}
+
+    for path in md_files:
+        if path.name.startswith('_'):
             continue
 
-        fm, _ = read_frontmatter(filepath)
-        rel   = filepath.replace(CONTENT_DIR + '/', '')
+        try:
+            fm, _ = read_frontmatter(str(path))
+        except (OSError, PermissionError) as e:
+            log.warning("list_pages: skip %s: %s", path, e)
+            skipped += 1
+            continue
+
+        rel = str(path).replace(CONTENT_DIR + '/', '')
 
         if lang:
-            basename    = os.path.basename(filepath)
-            in_lang_dir = f"/{lang}/" in filepath
-            lang_ext    = f".{lang}." in basename
+            in_lang_dir = f"/{lang}/" in str(path)
+            lang_ext    = f".{lang}." in path.name
             if not in_lang_dir and not lang_ext:
                 continue
 
@@ -276,7 +307,11 @@ async def tool_list_pages(args):
         })
 
     pages.sort(key=lambda x: x.get("date", ""), reverse=True)
-    return {"pages": pages, "total": len(pages)}
+    result = {"pages": pages, "total": len(pages)}
+    if skipped:
+        result["skipped"] = skipped
+        log.warning("list_pages: %d file(s) skipped due to read errors", skipped)
+    return result
 
 async def tool_get_page(args):
     route    = args.get("route", "")
