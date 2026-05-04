@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.1] — 2026-05-04
+
+### Fixed
+- `create_page` / `update_page` : `frontmatter` param désérialisé depuis JSON string si le transport MCP envoie un objet sérialisé (était silencieusement ignoré car `isinstance(..., dict)` → False)
+
 ## [1.2.0] — 2026-05-04
 
 ### Added

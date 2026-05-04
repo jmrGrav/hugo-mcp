@@ -339,6 +339,12 @@ async def tool_create_page(args):
     tags      = args.get("tags")
     draft     = args.get("draft")
     fm_custom = args.get("frontmatter")
+    if isinstance(fm_custom, str):
+        try:
+            fm_custom = json.loads(fm_custom)
+        except json.JSONDecodeError as e:
+            log.warning("frontmatter invalid JSON string: %s", e)
+            fm_custom = None
 
     filepath = f"{CONTENT_DIR}/{lang}/{route}/index.md"
 
@@ -380,6 +386,12 @@ async def tool_update_page(args):
     lang      = args.get("lang")
     content   = args.get("content", "")
     fm_custom = args.get("frontmatter")
+    if isinstance(fm_custom, str):
+        try:
+            fm_custom = json.loads(fm_custom)
+        except json.JSONDecodeError as e:
+            log.warning("frontmatter invalid JSON string: %s", e)
+            fm_custom = None
 
     filepath = find_page(route, lang)
     if not filepath:
