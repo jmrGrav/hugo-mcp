@@ -86,7 +86,7 @@ def read_frontmatter(filepath: str):
     return fm, parts[2].strip()
 
 def write_page(filepath: str, frontmatter: dict, content: str):
-    fm_str       = yaml.dump(frontmatter, allow_unicode=True, default_flow_style=False)
+    fm_str       = yaml.safe_dump(frontmatter, allow_unicode=True, default_flow_style=False, sort_keys=False)
     full_content = f"---\n{fm_str}---\n\n{content}\n"
     Path(filepath).parent.mkdir(parents=True, exist_ok=True)
     with open(filepath, 'w', encoding='utf-8') as f:
@@ -181,12 +181,13 @@ async def handle_list_tools(params):
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "route":   {"type": "string", "description": "Route ex: /posts/mon-article"},
-                    "lang":    {"type": "string", "description": "Langue (fr, en)", "default": "fr"},
-                    "title":   {"type": "string", "description": "Titre de la page"},
-                    "content": {"type": "string", "description": "Contenu Markdown"},
-                    "tags":    {"type": "array", "items": {"type": "string"}},
-                    "draft":   {"type": "boolean", "default": False},
+                    "route":        {"type": "string", "description": "Route ex: /posts/mon-article"},
+                    "lang":         {"type": "string", "description": "Langue (fr, en)", "default": "fr"},
+                    "title":        {"type": "string", "description": "Titre de la page"},
+                    "content":      {"type": "string", "description": "Contenu Markdown (sans front matter)"},
+                    "tags":         {"type": "array", "items": {"type": "string"}},
+                    "draft":        {"type": "boolean", "default": False},
+                    "frontmatter":  {"type": "object", "description": "Champs YAML libres (description, url, categories, featuredImage, toc, date custom…). Mergé en base ; title/tags/draft explicites priment en cas de conflit."},
                 },
                 "required": ["route", "title", "content"],
             },
@@ -197,12 +198,13 @@ async def handle_list_tools(params):
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "route":   {"type": "string"},
-                    "lang":    {"type": "string"},
-                    "title":   {"type": "string"},
-                    "content": {"type": "string"},
-                    "tags":    {"type": "array", "items": {"type": "string"}},
-                    "draft":   {"type": "boolean"},
+                    "route":       {"type": "string"},
+                    "lang":        {"type": "string"},
+                    "title":       {"type": "string"},
+                    "content":     {"type": "string"},
+                    "tags":        {"type": "array", "items": {"type": "string"}},
+                    "draft":       {"type": "boolean"},
+                    "frontmatter": {"type": "object", "description": "Champs YAML libres mergés sur le front matter existant. Si lastmod est fourni ici, il n'est pas écrasé par auto-lastmod."},
                 },
                 "required": ["route", "content"],
             },
@@ -330,26 +332,39 @@ async def tool_get_page(args):
     }
 
 async def tool_create_page(args):
-    route   = args.get("route", "").strip('/')
-    lang    = args.get("lang", "fr")
-    title   = args.get("title", "")
-    content = args.get("content", "")
-    tags    = args.get("tags", [])
-    draft   = args.get("draft", False)
+    route     = args.get("route", "").strip('/')
+    lang      = args.get("lang", "fr")
+    title     = args.get("title", "")
+    content   = args.get("content", "")
+    tags      = args.get("tags")
+    draft     = args.get("draft")
+    fm_custom = args.get("frontmatter")
 
     filepath = f"{CONTENT_DIR}/{lang}/{route}/index.md"
 
     if Path(filepath).exists():
         raise HTTPException(409, f"Page already exists: {filepath}")
 
-    frontmatter = {
-        "title": title,
-        "date":  datetime.now().strftime("%Y-%m-%dT%H:%M:%S+02:00"),
-        "draft": draft,
-        "tags":  tags,
-    }
+    # 1. Custom frontmatter as base
+    final_fm: dict = {}
+    if isinstance(fm_custom, dict):
+        final_fm.update(fm_custom)
 
-    write_page(filepath, frontmatter, content)
+    # 2. Explicit params override
+    final_fm["title"] = title
+    if tags is not None:
+        final_fm["tags"] = tags
+    if draft is not None:
+        final_fm["draft"] = draft
+
+    # 3. date/lastmod: auto-generate only when not supplied in frontmatter
+    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S+02:00")
+    if "date" not in final_fm:
+        final_fm["date"] = now
+    if "lastmod" not in final_fm:
+        final_fm["lastmod"] = now
+
+    write_page(filepath, final_fm, content)
     deploy_output = run_deploy()
     cf_result     = await purge_cloudflare([f"/{lang}/{route}/"])
 
@@ -361,16 +376,23 @@ async def tool_create_page(args):
     }
 
 async def tool_update_page(args):
-    route   = args.get("route", "")
-    lang    = args.get("lang")
-    content = args.get("content", "")
+    route     = args.get("route", "")
+    lang      = args.get("lang")
+    content   = args.get("content", "")
+    fm_custom = args.get("frontmatter")
 
     filepath = find_page(route, lang)
     if not filepath:
         raise HTTPException(404, f"Page not found: {route}")
 
+    # Start from existing frontmatter on disk
     fm, _ = read_frontmatter(filepath)
 
+    # 1. Apply custom frontmatter fields on top
+    if isinstance(fm_custom, dict):
+        fm.update(fm_custom)
+
+    # 2. Explicit params override
     if "title" in args:
         fm["title"] = args["title"]
     if "tags" in args:
@@ -378,7 +400,9 @@ async def tool_update_page(args):
     if "draft" in args:
         fm["draft"] = args["draft"]
 
-    fm["lastmod"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S+02:00")
+    # 3. Auto-lastmod only if caller did not supply one
+    if not (isinstance(fm_custom, dict) and "lastmod" in fm_custom):
+        fm["lastmod"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S+02:00")
 
     write_page(filepath, fm, content)
     deploy_output = run_deploy()

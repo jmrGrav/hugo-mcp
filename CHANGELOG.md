@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.2.0] — 2026-05-04
+
+### Added
+- `create_page` / `update_page` : nouveau paramètre `frontmatter` (dict libre) pour injecter description, url, categories, featuredImage, toc, date custom, et tout champ Hugo/thème
+- Logique de merge : `frontmatter` en base, puis champs explicites `title`/`tags`/`draft` priment en cas de conflit
+- `date` et `lastmod` auto-générés uniquement s'ils sont absents du `frontmatter` fourni → migration Grav préserve les dates d'origine
+- `update_page` : `lastmod` n'est plus écrasé si fourni dans `frontmatter` (comportement précédent : toujours `now()`)
+
+### Changed
+- `write_page` : `yaml.safe_dump(..., sort_keys=False)` — préserve l'ordre des clés et l'unicode
+
 ## [1.1.0] — 2026-05-04
 
 ### Changed
