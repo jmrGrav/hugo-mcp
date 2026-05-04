@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.3.0] — 2026-05-04
+
+### Breaking Change
+- Convention de fichiers Hugo LoveIt : `content/{lang}/{route}/index.md` → `content/{route}/index.{lang}.md`
+  LoveIt détecte les traductions par cohabitation dans le même dossier ; l'ancienne convention par sous-dossier de langue ne déclenchait pas le sélecteur de langue dans le menu.
+- Migration manuelle requise pour le contenu existant :
+  ```bash
+  cd /home/jm/hugo-site/content
+  for lang_dir in fr en; do
+      find $lang_dir -mindepth 2 -name "index.md" | while read f; do
+          slug=$(dirname "$f" | sed "s|^$lang_dir/||")
+          mkdir -p "$slug"
+          mv "$f" "$slug/index.$lang_dir.md"
+      done
+      find $lang_dir -type d -empty -delete
+  done
+  ```
+
+### Changed
+- `find_page` : cherche `index.{lang}.md` en priorité, fallback sur `index.md` (pages sans suffixe)
+- `tool_list_pages` : scanne `index.*.md`, extrait la langue du nom de fichier ; retourne désormais `route` et `lang` dans chaque entrée
+- `tool_create_page` : écrit dans `content/{route}/index.{lang}.md`
+- `tool_update_page` / `tool_delete_page` : adaptés à la nouvelle convention via `find_page`
+- Purge Cloudflare : chemin `/{route}/` (plus de préfixe `/{lang}/`)
+
 ## [1.2.1] — 2026-05-04
 
 ### Fixed

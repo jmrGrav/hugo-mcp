@@ -94,22 +94,13 @@ def write_page(filepath: str, frontmatter: dict, content: str):
 
 def find_page(route: str, lang: str = None) -> str | None:
     route = route.strip('/')
-
-    patterns = []
     if lang:
-        patterns += [
-            f"{CONTENT_DIR}/{lang}/{route}/index.md",
-            f"{CONTENT_DIR}/{route}/index.{lang}.md",
-            f"{CONTENT_DIR}/{route}.{lang}.md",
-        ]
-    patterns += [
-        f"{CONTENT_DIR}/{route}/index.md",
-        f"{CONTENT_DIR}/{route}.md",
-    ]
-
-    for p in patterns:
-        if Path(p).exists():
-            return p
+        candidate = f"{CONTENT_DIR}/{route}/index.{lang}.md"
+        if Path(candidate).exists():
+            return candidate
+    candidate = f"{CONTENT_DIR}/{route}/index.md"
+    if Path(candidate).exists():
+        return candidate
     return None
 
 # ── MCP Endpoint ──────────────────────────────────────────────────────────────
@@ -267,19 +258,27 @@ async def tool_list_pages(args):
     pages   = []
     skipped = 0
 
-    content_path = Path(CONTENT_DIR)
-    if not content_path.exists():
-        log.warning("list_pages: CONTENT_DIR absent: %s", CONTENT_DIR)
+    scan_path = Path(CONTENT_DIR)
+    if section:
+        scan_path = scan_path / section.strip('/')
+    if not scan_path.exists():
+        log.warning("list_pages: path absent: %s", scan_path)
         return {"pages": [], "total": 0}
 
     try:
-        md_files = list(content_path.rglob("*.md"))
+        md_files = list(scan_path.rglob("index.*.md"))
     except (PermissionError, OSError) as e:
         log.error("list_pages: walk failed: %s", e)
         return {"pages": [], "total": 0, "error": str(e)}
 
     for path in md_files:
-        if path.name.startswith('_'):
+        # stem of "index.fr.md" → "index.fr"
+        stem_parts = path.stem.split('.')
+        if len(stem_parts) != 2 or stem_parts[0] != 'index':
+            continue
+        file_lang = stem_parts[1]
+
+        if lang and file_lang != lang:
             continue
 
         try:
@@ -289,19 +288,12 @@ async def tool_list_pages(args):
             skipped += 1
             continue
 
-        rel = str(path).replace(CONTENT_DIR + '/', '')
-
-        if lang:
-            in_lang_dir = f"/{lang}/" in str(path)
-            lang_ext    = f".{lang}." in path.name
-            if not in_lang_dir and not lang_ext:
-                continue
-
-        if section and not rel.startswith(section):
-            continue
+        route = '/' + str(path.parent.relative_to(CONTENT_DIR))
 
         pages.append({
-            "file":  rel,
+            "route": route,
+            "lang":  file_lang,
+            "file":  str(path).replace(CONTENT_DIR + '/', ''),
             "title": fm.get("title", ""),
             "date":  str(fm.get("date", "")),
             "draft": fm.get("draft", False),
@@ -346,7 +338,7 @@ async def tool_create_page(args):
             log.warning("frontmatter invalid JSON string: %s", e)
             fm_custom = None
 
-    filepath = f"{CONTENT_DIR}/{lang}/{route}/index.md"
+    filepath = f"{CONTENT_DIR}/{route}/index.{lang}.md"
 
     if Path(filepath).exists():
         raise HTTPException(409, f"Page already exists: {filepath}")
@@ -372,7 +364,7 @@ async def tool_create_page(args):
 
     write_page(filepath, final_fm, content)
     deploy_output = run_deploy()
-    cf_result     = await purge_cloudflare([f"/{lang}/{route}/"])
+    cf_result     = await purge_cloudflare([f"/{route}/"])
 
     return {
         "status":   "created",
@@ -418,9 +410,7 @@ async def tool_update_page(args):
 
     write_page(filepath, fm, content)
     deploy_output = run_deploy()
-    route_clean   = route.strip('/')
-    cf_paths      = [f"/{lang}/{route_clean}/"] if lang else [f"/{route_clean}/"]
-    cf_result     = await purge_cloudflare(cf_paths)
+    cf_result     = await purge_cloudflare([f"/{route.strip('/')}/"])
 
     return {
         "status":   "updated",
