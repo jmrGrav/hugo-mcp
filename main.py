@@ -6,7 +6,7 @@ Gère les pages Hugo depuis Claude.ai
 
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse, Response
-import re, subprocess, os, glob, yaml, json, logging, traceback
+import re, hmac, time, subprocess, os, glob, yaml, json, logging, traceback
 from pathlib import Path
 from datetime import datetime
 import httpx
@@ -16,7 +16,14 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
-log = logging.getLogger("hugo-mcp")
+log       = logging.getLogger("hugo-mcp")
+audit_log = logging.getLogger("hugo-mcp.audit")
+
+START_TIME = time.time()
+METRICS    = {"create_page": 0, "update_page": 0, "delete_page": 0, "errors": 0}
+
+ALLOWED_MONITOR_IPS  = {"127.0.0.1", "192.168.122.1"}
+SENSITIVE_FRONTMATTER = {"aliases", "cascade", "build", "outputs", "headless", "_target"}
 
 load_dotenv()
 
@@ -65,12 +72,20 @@ def _safe_lang(lang: str | None) -> str | None:
         raise HTTPException(400, f"Invalid lang (must match ^[a-z]{{2,3}}$): {lang}")
     return lang
 
+def _validate_frontmatter(fm) -> dict:
+    if not isinstance(fm, dict):
+        return fm
+    forbidden = set(fm.keys()) & SENSITIVE_FRONTMATTER
+    if forbidden:
+        raise HTTPException(400, f"Forbidden frontmatter fields: {', '.join(sorted(forbidden))}")
+    return fm
+
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 def verify_token(request: Request):
     auth  = request.headers.get("Authorization", "")
     token = auth.replace("Bearer ", "").strip()
-    if not token or token != MCP_TOKEN:
+    if not token or not MCP_TOKEN or not hmac.compare_digest(token.encode(), MCP_TOKEN.encode()):
         raise HTTPException(status_code=401, detail="Unauthorized")
     return token
 
@@ -143,6 +158,29 @@ def find_page(route: str, lang: str = None) -> str | None:
 def health():
     return {"status": "ok", "service": "hugo-mcp"}
 
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
+@app.get("/readyz")
+def readyz():
+    if not _CONTENT_DIR_RESOLVED.exists():
+        return JSONResponse({"status": "not ready", "reason": "content dir missing"}, status_code=503)
+    return {"status": "ready"}
+
+@app.get("/metrics")
+def metrics(request: Request):
+    if request.client.host not in ALLOWED_MONITOR_IPS:
+        raise HTTPException(403, "Forbidden")
+    uptime = int(time.time() - START_TIME)
+    lines = [
+        "# TYPE hugo_mcp_uptime_seconds counter",
+        f"hugo_mcp_uptime_seconds {uptime}",
+    ]
+    for k, v in METRICS.items():
+        lines += [f"# TYPE hugo_mcp_{k}_total counter", f"hugo_mcp_{k}_total {v}"]
+    return Response("\n".join(lines) + "\n", media_type="text/plain")
+
 @app.post("/mcp")
 async def mcp_handler(request: Request, _=Depends(verify_token)):
     body   = await request.json()
@@ -162,7 +200,10 @@ async def mcp_handler(request: Request, _=Depends(verify_token)):
                              "error": {"code": -32601, "message": f"Method not found: {method}"}})
 
     try:
-        result = await handler(params)
+        if method == "tools/call":
+            result = await handle_tool_call(params, request)
+        else:
+            result = await handler(params)
         return JSONResponse({"jsonrpc": "2.0", "id": req_id, "result": result})
     except HTTPException as e:
         return JSONResponse({"jsonrpc": "2.0", "id": req_id,
@@ -258,9 +299,16 @@ async def handle_list_tools(params):
         },
     ]}
 
-async def handle_tool_call(params):
+async def handle_tool_call(params, request=None):
     tool_name = params.get("name", "")
     args      = params.get("arguments", {})
+
+    _WRITE_TOOLS = {"create_page", "update_page", "delete_page"}
+    if tool_name in _WRITE_TOOLS:
+        ip = request.client.host if request else "unknown"
+        audit_log.info("action=%s route=%s lang=%s ip=%s",
+                       tool_name, args.get("route", "-"), args.get("lang", "-"), ip)
+        METRICS[tool_name] = METRICS.get(tool_name, 0) + 1
 
     tools = {
         "list_pages":  tool_list_pages,
@@ -279,9 +327,11 @@ async def handle_tool_call(params):
         return {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]}
     except HTTPException as e:
         log.warning("tool_error tool=%s http=%s detail=%s", tool_name, e.status_code, e.detail)
+        METRICS["errors"] = METRICS.get("errors", 0) + 1
         return {"content": [{"type": "text", "text": e.detail}], "isError": True}
     except Exception as e:
         log.error("tool_error tool=%s error=%s\n%s", tool_name, e, traceback.format_exc())
+        METRICS["errors"] = METRICS.get("errors", 0) + 1
         return {"content": [{"type": "text", "text": f"{type(e).__name__}: {e}"}], "isError": True}
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
@@ -371,6 +421,7 @@ async def tool_create_page(args):
         except json.JSONDecodeError as e:
             log.warning("frontmatter invalid JSON string: %s", e)
             fm_custom = None
+    fm_custom = _validate_frontmatter(fm_custom)
 
     filepath = f"{CONTENT_DIR}/{route}/index.{lang}.md"
 
@@ -418,6 +469,7 @@ async def tool_update_page(args):
         except json.JSONDecodeError as e:
             log.warning("frontmatter invalid JSON string: %s", e)
             fm_custom = None
+    fm_custom = _validate_frontmatter(fm_custom)
 
     filepath = find_page(route, lang)
     if not filepath:

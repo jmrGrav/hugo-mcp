@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.6.0] — 2026-05-07
+
+### Added
+- **H-11 LOW** : endpoints `/healthz`, `/readyz`, `/metrics` — `/metrics` restreint à loopback + 192.168.122.1 (Prometheus-compatible)
+
+## [1.5.1] — 2026-05-07
+
+### Security
+- **H-10 LOW** : `_validate_frontmatter()` — blacklist des champs sensibles (`aliases`, `cascade`, `build`, `outputs`, `headless`, `_target`) ; HTTP 400 si l'un d'eux est présent dans le param `frontmatter`
+
+## [1.5.0] — 2026-05-07
+
+### Security
+- **H-06 LOW** : audit log des opérations write (`create_page`, `update_page`, `delete_page`) via `logging.getLogger("hugo-mcp.audit")` → journald ; champ `ip` inclus
+- **H-08 LOW** : `verify_token()` utilise `hmac.compare_digest` (constant-time) pour éviter les timing attacks
+
 ## [1.4.0] — 2026-05-07
 
 ### Security
