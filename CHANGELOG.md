@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1] — 2026-05-07
+
+### Security
+- **H-01 CRITICAL** : `_safe_route()` — validation par `Path.resolve().relative_to()` avant toute opération FS ; 400 si la route tente d'échapper `CONTENT_DIR`
+- **H-09 LOW** : `_safe_lang()` — whitelist regex `^[a-z]{2,3}$` ; 400 si le code de langue est invalide ou contient des caractères spéciaux
+- Les deux validateurs sont appelés au début de `tool_create_page`, `tool_update_page`, `tool_delete_page`, `tool_get_page`
+
 ## [1.3.0] — 2026-05-04
 
 ### Breaking Change

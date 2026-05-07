@@ -6,7 +6,7 @@ Gère les pages Hugo depuis Claude.ai
 
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
-import subprocess, os, glob, yaml, json, logging, traceback
+import re, subprocess, os, glob, yaml, json, logging, traceback
 from pathlib import Path
 from datetime import datetime
 import httpx
@@ -23,13 +23,35 @@ load_dotenv()
 app = FastAPI(title="Hugo MCP Server")
 
 HUGO_SITE   = "/home/jm/hugo-site"
-CONTENT_DIR = f"{HUGO_SITE}/content"
-DEPLOY_SH   = "/home/jm/deploy.sh"
+CONTENT_DIR           = f"{HUGO_SITE}/content"
+_CONTENT_DIR_RESOLVED = Path(CONTENT_DIR).resolve()
+LANG_REGEX            = re.compile(r'^[a-z]{2,3}$')
+DEPLOY_SH             = "/home/jm/deploy.sh"
 MCP_TOKEN   = os.environ.get("MCP_TOKEN", "")
 
 CF_TOKEN    = os.environ.get("CF_TOKEN", "")
 CF_ZONE_ID  = os.environ.get("CF_ZONE_ID", "")
 CF_BASE_URL = "https://hugo-test.arleo.eu"
+
+# ── Input validation ──────────────────────────────────────────────────────────
+
+def _safe_route(route: str) -> str:
+    clean = route.strip('/')
+    if not clean:
+        raise HTTPException(400, "Empty route")
+    candidate = (_CONTENT_DIR_RESOLVED / clean).resolve()
+    try:
+        candidate.relative_to(_CONTENT_DIR_RESOLVED)
+    except ValueError:
+        raise HTTPException(400, f"Invalid route (path traversal): {route}")
+    return clean
+
+def _safe_lang(lang: str | None) -> str | None:
+    if not lang:
+        return None
+    if not LANG_REGEX.match(lang):
+        raise HTTPException(400, f"Invalid lang (must match ^[a-z]{{2,3}}$): {lang}")
+    return lang
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -308,8 +330,8 @@ async def tool_list_pages(args):
     return result
 
 async def tool_get_page(args):
-    route    = args.get("route", "")
-    lang     = args.get("lang")
+    route    = _safe_route(args.get("route", ""))
+    lang     = _safe_lang(args.get("lang"))
     filepath = find_page(route, lang)
 
     if not filepath:
@@ -324,8 +346,8 @@ async def tool_get_page(args):
     }
 
 async def tool_create_page(args):
-    route     = args.get("route", "").strip('/')
-    lang      = args.get("lang", "fr")
+    route     = _safe_route(args.get("route", ""))
+    lang      = _safe_lang(args.get("lang", "fr")) or "fr"
     title     = args.get("title", "")
     content   = args.get("content", "")
     tags      = args.get("tags")
@@ -374,8 +396,8 @@ async def tool_create_page(args):
     }
 
 async def tool_update_page(args):
-    route     = args.get("route", "")
-    lang      = args.get("lang")
+    route     = _safe_route(args.get("route", ""))
+    lang      = _safe_lang(args.get("lang"))
     content   = args.get("content", "")
     fm_custom = args.get("frontmatter")
     if isinstance(fm_custom, str):
@@ -420,8 +442,8 @@ async def tool_update_page(args):
     }
 
 async def tool_delete_page(args):
-    route    = args.get("route", "")
-    lang     = args.get("lang")
+    route    = _safe_route(args.get("route", ""))
+    lang     = _safe_lang(args.get("lang"))
     filepath = find_page(route, lang)
 
     if not filepath:
