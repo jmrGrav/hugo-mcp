@@ -5,7 +5,7 @@ Gère les pages Hugo depuis Claude.ai
 """
 
 from fastapi import FastAPI, HTTPException, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 import re, subprocess, os, glob, yaml, json, logging, traceback
 from pathlib import Path
 from datetime import datetime
@@ -21,6 +21,18 @@ log = logging.getLogger("hugo-mcp")
 load_dotenv()
 
 app = FastAPI(title="Hugo MCP Server")
+
+MAX_REQUEST_BODY_SIZE = 512 * 1024  # 512 KB
+
+@app.middleware("http")
+async def limit_request_body(request: Request, call_next):
+    cl = request.headers.get("content-length")
+    if cl and int(cl) > MAX_REQUEST_BODY_SIZE:
+        return JSONResponse(
+            {"error": f"Request body too large (max {MAX_REQUEST_BODY_SIZE} bytes)"},
+            status_code=413,
+        )
+    return await call_next(request)
 
 HUGO_SITE   = "/home/jm/hugo-site"
 CONTENT_DIR           = f"{HUGO_SITE}/content"

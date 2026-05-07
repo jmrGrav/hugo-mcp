@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0] — 2026-05-07
+
+### Security
+- **H-04 MEDIUM** : Port 8000 déjà restreint par UFW (`allow from 192.168.122.1`, default deny incoming) — finding confirmé clos, aucun code changé
+- **H-05 MEDIUM** : middleware `limit_request_body` — rejette les bodies > 512 KB avec HTTP 413
+- **H-07 MEDIUM** : starlette 0.38.6 → 1.0.0, fastapi 0.115.0 → 0.136.1 (corrige CVE-2024-47874 ReDoS)
+
 ## [1.3.1] — 2026-05-07
 
 ### Security
