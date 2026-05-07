@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.7.0] — 2026-05-07
+
+### Added
+- `frontmatter` parameter now fully exposed in `create_page` and `update_page` schemas (object libre, validé côté serveur)
+- `update_page` : sémantique deep merge — les dict imbriqués sont mergés récursivement ; `null` supprime un champ existant
+- `_deep_merge()` helper pour merge récursif avec sentinelle null
+
+### Security
+- Validation stricte du frontmatter : taille (10 KB), profondeur (3 niveaux), types autorisés, clés non-string → HTTP 400
+- Détection de conflit entre param dédié (title/tags/draft) et frontmatter → HTTP 400
+- Champ `date` immuable sur `update_page` → HTTP 400 si tentative de modification
+- `null` refusé sur `create_page` (uniquement valide sur `update_page` pour suppression)
+
+### Notes
+- Rétrocompatible : omettre `frontmatter` conserve le comportement précédent
+- `date` et `lastmod` auto-générés si absents du frontmatter fourni
+
 ## [1.6.0] — 2026-05-07
 
 ### Added

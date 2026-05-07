@@ -22,8 +22,12 @@ audit_log = logging.getLogger("hugo-mcp.audit")
 START_TIME = time.time()
 METRICS    = {"create_page": 0, "update_page": 0, "delete_page": 0, "errors": 0}
 
-ALLOWED_MONITOR_IPS  = {"127.0.0.1", "192.168.122.1"}
-SENSITIVE_FRONTMATTER = {"aliases", "cascade", "build", "outputs", "headless", "_target"}
+ALLOWED_MONITOR_IPS      = {"127.0.0.1", "192.168.122.1"}
+SENSITIVE_FRONTMATTER_FIELDS = {"aliases", "cascade", "build", "outputs", "headless", "_target"}
+RESERVED_DEDICATED_PARAMS    = {"title", "tags", "draft"}
+IMMUTABLE_UPDATE_FIELDS      = {"date"}
+MAX_FRONTMATTER_BYTES        = 10 * 1024
+MAX_FRONTMATTER_DEPTH        = 3
 
 load_dotenv()
 
@@ -72,13 +76,76 @@ def _safe_lang(lang: str | None) -> str | None:
         raise HTTPException(400, f"Invalid lang (must match ^[a-z]{{2,3}}$): {lang}")
     return lang
 
-def _validate_frontmatter(fm) -> dict:
+def _validate_frontmatter(
+    fm,
+    *,
+    is_update: bool = False,
+    dedicated_params: dict | None = None,
+) -> dict:
+    if fm is None:
+        return {}
     if not isinstance(fm, dict):
-        return fm
-    forbidden = set(fm.keys()) & SENSITIVE_FRONTMATTER
+        raise HTTPException(400, "frontmatter must be a dict (or null)")
+
+    size = len(json.dumps(fm).encode("utf-8"))
+    if size > MAX_FRONTMATTER_BYTES:
+        raise HTTPException(400, f"frontmatter too large: {size} bytes (max {MAX_FRONTMATTER_BYTES})")
+
+    forbidden = set(fm.keys()) & SENSITIVE_FRONTMATTER_FIELDS
     if forbidden:
-        raise HTTPException(400, f"Forbidden frontmatter fields: {', '.join(sorted(forbidden))}")
+        raise HTTPException(400,
+            f"Forbidden frontmatter fields (security): {', '.join(sorted(forbidden))}")
+
+    if dedicated_params:
+        provided = {k for k, v in dedicated_params.items()
+                    if v is not None and v != [] and v != ""}
+        conflicts = set(fm.keys()) & provided
+        if conflicts:
+            raise HTTPException(400,
+                f"Conflict: field(s) provided both as dedicated param and in frontmatter: "
+                f"{', '.join(sorted(conflicts))}. Use only one.")
+
+    def _check(value, depth: int, path: str) -> None:
+        if depth > MAX_FRONTMATTER_DEPTH:
+            raise HTTPException(400,
+                f"frontmatter too deep at '{path}' (max depth {MAX_FRONTMATTER_DEPTH})")
+        if value is None:
+            if not is_update:
+                raise HTTPException(400,
+                    f"null not allowed at '{path}' on create_page "
+                    f"(only valid on update_page for field deletion)")
+            return
+        if not isinstance(value, (str, int, float, bool, list, dict)):
+            raise HTTPException(400,
+                f"Invalid type at '{path}': {type(value).__name__} "
+                f"(allowed: str, int, float, bool, list, dict, null)")
+        if isinstance(value, dict):
+            for k, v in value.items():
+                if not isinstance(k, str):
+                    raise HTTPException(400, f"Non-string key at '{path}': {k!r}")
+                _check(v, depth + 1, f"{path}.{k}")
+        elif isinstance(value, list):
+            for i, item in enumerate(value):
+                _check(item, depth + 1, f"{path}[{i}]")
+
+    for k, v in fm.items():
+        if not isinstance(k, str):
+            raise HTTPException(400, f"Non-string top-level key: {k!r}")
+        _check(v, 1, k)
+
     return fm
+
+
+def _deep_merge(existing: dict, updates: dict) -> dict:
+    result = dict(existing)
+    for k, v in updates.items():
+        if v is None:
+            result.pop(k, None)
+        elif isinstance(v, dict) and isinstance(result.get(k), dict):
+            result[k] = _deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -253,7 +320,18 @@ async def handle_list_tools(params):
                     "content":      {"type": "string", "description": "Contenu Markdown (sans front matter)"},
                     "tags":         {"type": "array", "items": {"type": "string"}},
                     "draft":        {"type": "boolean", "default": False},
-                    "frontmatter":  {"type": "object", "description": "Champs YAML libres (description, url, categories, featuredImage, toc, date custom…). Mergé en base ; title/tags/draft explicites priment en cas de conflit."},
+                    "frontmatter":  {
+                        "type": "object",
+                        "additionalProperties": True,
+                        "description": (
+                            "Champs frontmatter libres (description, categories, featuredImage, "
+                            "lastmod, date, etc.). Chaque valeur : string/number/boolean/list/dict "
+                            "(max 3 niveaux, 10 KB total). "
+                            "Champs interdits : aliases, cascade, build, outputs, headless, _target → HTTP 400. "
+                            "Conflit avec un param dédié (title, tags, draft) → HTTP 400. "
+                            "date et lastmod auto-générés si absents."
+                        ),
+                    },
                 },
                 "required": ["route", "title", "content"],
             },
@@ -270,7 +348,18 @@ async def handle_list_tools(params):
                     "content":     {"type": "string"},
                     "tags":        {"type": "array", "items": {"type": "string"}},
                     "draft":       {"type": "boolean"},
-                    "frontmatter": {"type": "object", "description": "Champs YAML libres mergés sur le front matter existant. Si lastmod est fourni ici, il n'est pas écrasé par auto-lastmod."},
+                    "frontmatter": {
+                        "type": "object",
+                        "additionalProperties": True,
+                        "description": (
+                            "Champs frontmatter libres mergés profondément sur le frontmatter existant. "
+                            "Utiliser null pour supprimer un champ (ex: {\"description\": null}). "
+                            "Chaque valeur : string/number/boolean/list/dict (max 3 niveaux, 10 KB). "
+                            "Champs interdits : aliases, cascade, build, outputs, headless, _target → HTTP 400. "
+                            "Conflit avec un param dédié (title, tags, draft) → HTTP 400. "
+                            "date est immuable. lastmod auto-mis à jour si absent."
+                        ),
+                    },
                 },
                 "required": ["route", "content"],
             },
@@ -408,44 +497,42 @@ async def tool_get_page(args):
     }
 
 async def tool_create_page(args):
-    route     = _safe_route(args.get("route", ""))
-    lang      = _safe_lang(args.get("lang", "fr")) or "fr"
-    title     = args.get("title", "")
-    content   = args.get("content", "")
-    tags      = args.get("tags")
-    draft     = args.get("draft")
-    fm_custom = args.get("frontmatter")
-    if isinstance(fm_custom, str):
+    route   = _safe_route(args.get("route", ""))
+    lang    = _safe_lang(args.get("lang", "fr")) or "fr"
+    title   = args.get("title", "")
+    content = args.get("content", "")
+    tags    = args.get("tags")
+    draft   = args.get("draft")
+    fm_user = args.get("frontmatter")
+
+    if isinstance(fm_user, str):
         try:
-            fm_custom = json.loads(fm_custom)
+            fm_user = json.loads(fm_user)
         except json.JSONDecodeError as e:
             log.warning("frontmatter invalid JSON string: %s", e)
-            fm_custom = None
-    fm_custom = _validate_frontmatter(fm_custom)
+            fm_user = None
+
+    fm_user = _validate_frontmatter(
+        fm_user,
+        is_update=False,
+        dedicated_params={"title": title, "tags": tags, "draft": draft},
+    )
 
     filepath = f"{CONTENT_DIR}/{route}/index.{lang}.md"
-
     if Path(filepath).exists():
         raise HTTPException(409, f"Page already exists: {filepath}")
 
-    # 1. Custom frontmatter as base
-    final_fm: dict = {}
-    if isinstance(fm_custom, dict):
-        final_fm.update(fm_custom)
-
-    # 2. Explicit params override
-    final_fm["title"] = title
+    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S+02:00")
+    final_fm: dict = {"title": title}
     if tags is not None:
         final_fm["tags"] = tags
     if draft is not None:
         final_fm["draft"] = draft
-
-    # 3. date/lastmod: auto-generate only when not supplied in frontmatter
-    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S+02:00")
-    if "date" not in final_fm:
+    if "date" not in fm_user:
         final_fm["date"] = now
-    if "lastmod" not in final_fm:
+    if "lastmod" not in fm_user:
         final_fm["lastmod"] = now
+    final_fm.update(fm_user)
 
     write_page(filepath, final_fm, content)
     deploy_output = run_deploy()
@@ -459,42 +546,53 @@ async def tool_create_page(args):
     }
 
 async def tool_update_page(args):
-    route     = _safe_route(args.get("route", ""))
-    lang      = _safe_lang(args.get("lang"))
-    content   = args.get("content", "")
-    fm_custom = args.get("frontmatter")
-    if isinstance(fm_custom, str):
+    route   = _safe_route(args.get("route", ""))
+    lang    = _safe_lang(args.get("lang"))
+    content = args.get("content", "")
+    fm_user = args.get("frontmatter")
+
+    if isinstance(fm_user, str):
         try:
-            fm_custom = json.loads(fm_custom)
+            fm_user = json.loads(fm_user)
         except json.JSONDecodeError as e:
             log.warning("frontmatter invalid JSON string: %s", e)
-            fm_custom = None
-    fm_custom = _validate_frontmatter(fm_custom)
+            fm_user = None
+
+    fm_user = _validate_frontmatter(
+        fm_user,
+        is_update=True,
+        dedicated_params={
+            "title": args.get("title"),
+            "tags":  args.get("tags"),
+            "draft": args.get("draft"),
+        },
+    )
+
+    immutable_attempts = set(fm_user.keys()) & IMMUTABLE_UPDATE_FIELDS
+    if immutable_attempts:
+        raise HTTPException(400,
+            f"Field(s) cannot be modified via update_page: "
+            f"{', '.join(sorted(immutable_attempts))}")
 
     filepath = find_page(route, lang)
     if not filepath:
         raise HTTPException(404, f"Page not found: {route}")
 
-    # Start from existing frontmatter on disk
     fm, _ = read_frontmatter(filepath)
 
-    # 1. Apply custom frontmatter fields on top
-    if isinstance(fm_custom, dict):
-        fm.update(fm_custom)
-
-    # 2. Explicit params override
+    final_fm = dict(fm)
     if "title" in args:
-        fm["title"] = args["title"]
+        final_fm["title"] = args["title"]
     if "tags" in args:
-        fm["tags"] = args["tags"]
+        final_fm["tags"] = args["tags"]
     if "draft" in args:
-        fm["draft"] = args["draft"]
+        final_fm["draft"] = args["draft"]
+    if "lastmod" not in fm_user:
+        final_fm["lastmod"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S+02:00")
 
-    # 3. Auto-lastmod only if caller did not supply one
-    if not (isinstance(fm_custom, dict) and "lastmod" in fm_custom):
-        fm["lastmod"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S+02:00")
+    final_fm = _deep_merge(final_fm, fm_user)
 
-    write_page(filepath, fm, content)
+    write_page(filepath, final_fm, content)
     deploy_output = run_deploy()
     cf_result     = await purge_cloudflare([f"/{route.strip('/')}/"])
 
