@@ -56,6 +56,11 @@ CF_TOKEN    = os.environ.get("CF_TOKEN", "")
 CF_ZONE_ID  = os.environ.get("CF_ZONE_ID", "")
 CF_BASE_URL = "https://hugo-test.arleo.eu"
 
+STATIC_DIR                = f"{HUGO_SITE}/static"
+ASSET_EXTENSIONS_IMAGE    = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.avif'}
+ASSET_EXTENSIONS_DOCUMENT = {'.pdf', '.txt', '.csv', '.zip'}
+MAX_ASSETS_RESULT         = 500
+
 # ── Input validation ──────────────────────────────────────────────────────────
 
 def normalize_route(route: str) -> tuple[str, bool]:
@@ -397,6 +402,21 @@ async def handle_list_tools(params):
                 },
             },
         },
+        {
+            "name":        "list_assets",
+            "description": "Lister les assets du site Hugo (static/ et page bundles dans content/), triés par date de modification décroissante",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "type":        {"type": "string", "enum": ["image", "document", "all"], "default": "all",
+                                   "description": "Filtrer par type : image (jpg/png/svg…), document (pdf/csv/zip…), all"},
+                    "path_prefix": {"type": "string",
+                                   "description": "Sous-dossier relatif à filtrer (ex: posts/mon-article/). Sans leading /, sans .."},
+                    "max_results": {"type": "integer", "default": 100, "maximum": 500,
+                                   "description": "Nombre max de résultats (défaut 100, max 500)"},
+                },
+            },
+        },
     ]}
 
 async def handle_tool_call(params, request=None):
@@ -417,6 +437,7 @@ async def handle_tool_call(params, request=None):
         "update_page": tool_update_page,
         "delete_page": tool_delete_page,
         "build_site":  tool_build_site,
+        "list_assets": tool_list_assets,
     }
 
     tool = tools.get(tool_name)
@@ -668,6 +689,54 @@ async def tool_build_site(args):
         (t_build-t0)*1000, (t_purge-t_build)*1000, (t_purge-t0)*1000)
 
     return {"status": "built", "deploy": deploy_output, "cf_purge": cf_result}
+
+async def tool_list_assets(args):
+    asset_type  = args.get("type", "all")
+    path_prefix = args.get("path_prefix", "")
+    max_results = min(int(args.get("max_results", 100)), MAX_ASSETS_RESULT)
+
+    if path_prefix and (path_prefix.startswith('/') or '..' in path_prefix):
+        raise HTTPException(400, "Invalid path_prefix: must be relative without '..'")
+
+    exts = (ASSET_EXTENSIONS_IMAGE    if asset_type == "image"
+            else ASSET_EXTENSIONS_DOCUMENT if asset_type == "document"
+            else ASSET_EXTENSIONS_IMAGE | ASSET_EXTENSIONS_DOCUMENT)
+
+    _MIME = {'.jpg':'image/jpeg','.jpeg':'image/jpeg','.png':'image/png',
+             '.gif':'image/gif','.webp':'image/webp','.svg':'image/svg+xml',
+             '.avif':'image/avif','.pdf':'application/pdf','.txt':'text/plain',
+             '.csv':'text/csv','.zip':'application/zip'}
+
+    assets = []
+    for scan_root in (Path(STATIC_DIR), Path(CONTENT_DIR)):
+        if not scan_root.exists():
+            continue
+        base = (scan_root / path_prefix) if path_prefix else scan_root
+        try:
+            base.resolve().relative_to(scan_root.resolve())
+        except ValueError:
+            raise HTTPException(400, "Invalid path_prefix: path traversal detected")
+        if not base.exists():
+            continue
+        for p in base.rglob("*"):
+            if not p.is_file() or p.suffix.lower() not in exts:
+                continue
+            if p.name.startswith(('index.', '_index.')):
+                continue
+            try:
+                st = p.stat()
+                assets.append({
+                    "path":       str(p.relative_to(Path(HUGO_SITE))),
+                    "size_bytes": st.st_size,
+                    "mime_type":  _MIME.get(p.suffix.lower(), "application/octet-stream"),
+                    "modified":   datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%dT%H:%M:%S"),
+                })
+            except OSError:
+                continue
+
+    assets.sort(key=lambda a: a["modified"], reverse=True)
+    truncated = len(assets) > max_results
+    return {"count": min(len(assets), max_results), "truncated": truncated, "assets": assets[:max_results]}
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
