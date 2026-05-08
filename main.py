@@ -548,9 +548,15 @@ async def tool_create_page(args):
         final_fm["lastmod"] = now
     final_fm.update(fm_user)
 
+    t0 = time.perf_counter()
     write_page(filepath, final_fm, content)
+    t_write = time.perf_counter()
     deploy_output = run_deploy()
+    t_build = time.perf_counter()
     cf_result     = await purge_cloudflare(["/" if route == '_index' else f"/{route}/"])
+    t_purge = time.perf_counter()
+    audit_log.info("timing op=create_page route=%s lang=%s write=%dms build=%dms purge=%dms total=%dms",
+        route, lang, (t_write-t0)*1000, (t_build-t_write)*1000, (t_purge-t_build)*1000, (t_purge-t0)*1000)
 
     return {
         "status":   "created",
@@ -606,9 +612,15 @@ async def tool_update_page(args):
 
     final_fm = _deep_merge(final_fm, fm_user)
 
+    t0 = time.perf_counter()
     write_page(filepath, final_fm, content)
+    t_write = time.perf_counter()
     deploy_output = run_deploy()
+    t_build = time.perf_counter()
     cf_result     = await purge_cloudflare(["/" if route == '_index' else f"/{route.strip('/')}/"])
+    t_purge = time.perf_counter()
+    audit_log.info("timing op=update_page route=%s lang=%s write=%dms build=%dms purge=%dms total=%dms",
+        route, lang, (t_write-t0)*1000, (t_build-t_write)*1000, (t_purge-t_build)*1000, (t_purge-t0)*1000)
 
     return {
         "status":   "updated",
@@ -625,14 +637,18 @@ async def tool_delete_page(args):
     if not filepath:
         raise HTTPException(404, f"Page not found: {route}")
 
+    t0 = time.perf_counter()
     os.remove(filepath)
-
     parent = Path(filepath).parent
     if parent.exists() and not any(parent.iterdir()):
         parent.rmdir()
-
+    t_write = time.perf_counter()
     deploy_output = run_deploy()
+    t_build = time.perf_counter()
     cf_result     = await purge_cloudflare()
+    t_purge = time.perf_counter()
+    audit_log.info("timing op=delete_page route=%s lang=%s delete=%dms build=%dms purge=%dms total=%dms",
+        route, lang, (t_write-t0)*1000, (t_build-t_write)*1000, (t_purge-t_build)*1000, (t_purge-t0)*1000)
 
     return {
         "status":   "deleted",
@@ -643,8 +659,13 @@ async def tool_delete_page(args):
 
 async def tool_build_site(args):
     purge_cf      = args.get("purge_cf", True)
+    t0 = time.perf_counter()
     deploy_output = run_deploy()
+    t_build = time.perf_counter()
     cf_result     = await purge_cloudflare() if purge_cf else {"skipped": True}
+    t_purge = time.perf_counter()
+    audit_log.info("timing op=build_site build=%dms purge=%dms total=%dms",
+        (t_build-t0)*1000, (t_purge-t_build)*1000, (t_purge-t0)*1000)
 
     return {"status": "built", "deploy": deploy_output, "cf_purge": cf_result}
 
