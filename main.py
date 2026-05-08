@@ -58,16 +58,20 @@ CF_BASE_URL = "https://hugo-test.arleo.eu"
 
 # ── Input validation ──────────────────────────────────────────────────────────
 
+def normalize_route(route: str) -> tuple[str, bool]:
+    s = route.strip('/')
+    return ('_index', True) if s in ('', '_index', 'index') else (s, False)
+
 def _safe_route(route: str) -> str:
-    clean = route.strip('/')
-    if not clean:
-        raise HTTPException(400, "Empty route")
-    candidate = (_CONTENT_DIR_RESOLVED / clean).resolve()
+    normalized, is_root = normalize_route(route)
+    if is_root:
+        return '_index'
+    candidate = (_CONTENT_DIR_RESOLVED / normalized).resolve()
     try:
         candidate.relative_to(_CONTENT_DIR_RESOLVED)
     except ValueError:
         raise HTTPException(400, f"Invalid route (path traversal): {route}")
-    return clean
+    return normalized
 
 def _safe_lang(lang: str | None) -> str | None:
     if not lang:
@@ -209,6 +213,13 @@ def write_page(filepath: str, frontmatter: dict, content: str):
         f.write(full_content)
 
 def find_page(route: str, lang: str = None) -> str | None:
+    if route == '_index':
+        if lang:
+            p = f"{CONTENT_DIR}/_index.{lang}.md"
+            if Path(p).exists():
+                return p
+        p = f"{CONTENT_DIR}/_index.md"
+        return p if Path(p).exists() else None
     route = route.strip('/')
     if lang:
         candidate = f"{CONTENT_DIR}/{route}/index.{lang}.md"
@@ -439,15 +450,14 @@ async def tool_list_pages(args):
         return {"pages": [], "total": 0}
 
     try:
-        md_files = list(scan_path.rglob("index.*.md"))
+        md_files = list(scan_path.glob("_index.*.md")) + list(scan_path.rglob("index.*.md"))
     except (PermissionError, OSError) as e:
         log.error("list_pages: walk failed: %s", e)
         return {"pages": [], "total": 0, "error": str(e)}
 
     for path in md_files:
-        # stem of "index.fr.md" → "index.fr"
         stem_parts = path.stem.split('.')
-        if len(stem_parts) != 2 or stem_parts[0] != 'index':
+        if len(stem_parts) != 2 or stem_parts[0] not in ('index', '_index'):
             continue
         file_lang = stem_parts[1]
 
@@ -461,7 +471,10 @@ async def tool_list_pages(args):
             skipped += 1
             continue
 
-        route = '/' + str(path.parent.relative_to(CONTENT_DIR))
+        if path.name.startswith('_index.') and path.parent == Path(CONTENT_DIR):
+            route = '/'
+        else:
+            route = '/' + str(path.parent.relative_to(CONTENT_DIR))
 
         pages.append({
             "route": route,
@@ -490,7 +503,7 @@ async def tool_get_page(args):
 
     fm, content = read_frontmatter(filepath)
     return {
-        "route":       route,
+        "route":       "/" if route == '_index' else route,
         "file":        filepath.replace(CONTENT_DIR + '/', ''),
         "frontmatter": fm,
         "content":     content,
@@ -518,7 +531,8 @@ async def tool_create_page(args):
         dedicated_params={"title": title, "tags": tags, "draft": draft},
     )
 
-    filepath = f"{CONTENT_DIR}/{route}/index.{lang}.md"
+    filepath = (f"{CONTENT_DIR}/_index.{lang}.md" if route == '_index'
+                else f"{CONTENT_DIR}/{route}/index.{lang}.md")
     if Path(filepath).exists():
         raise HTTPException(409, f"Page already exists: {filepath}")
 
@@ -536,7 +550,7 @@ async def tool_create_page(args):
 
     write_page(filepath, final_fm, content)
     deploy_output = run_deploy()
-    cf_result     = await purge_cloudflare([f"/{route}/"])
+    cf_result     = await purge_cloudflare(["/" if route == '_index' else f"/{route}/"])
 
     return {
         "status":   "created",
@@ -594,7 +608,7 @@ async def tool_update_page(args):
 
     write_page(filepath, final_fm, content)
     deploy_output = run_deploy()
-    cf_result     = await purge_cloudflare([f"/{route.strip('/')}/"])
+    cf_result     = await purge_cloudflare(["/" if route == '_index' else f"/{route.strip('/')}/"])
 
     return {
         "status":   "updated",
