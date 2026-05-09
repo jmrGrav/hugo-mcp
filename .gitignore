@@ -5,3 +5,8 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+config/plugins.yaml
+tokens.json
+tls/
+requirements.lock
+backup.sh

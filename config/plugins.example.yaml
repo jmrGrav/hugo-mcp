@@ -1,0 +1,31 @@
+# hugo-mcp plugins configuration — EXAMPLE
+# Copy to config/plugins.yaml and edit with real values.
+# config/plugins.yaml is gitignored (never commit real credentials).
+
+indexnow:
+  enabled: true
+  host: example.com
+  key: REPLACE_WITH_YOUR_INDEXNOW_KEY
+  key_location: https://example.com/REPLACE_WITH_YOUR_INDEXNOW_KEY.txt
+  endpoints:
+  - https://api.indexnow.org/indexnow
+google_indexing:
+  enabled: false
+  service_account_path: /etc/hugo-mcp/google-sa.json
+  daily_quota_limit: 180
+excluded_routes:
+- /tags/
+- /categories/
+- /search/
+cloudflare:
+  enabled: true
+  mode: smart
+  api_token_env: CF_TOKEN
+  zone_id: REPLACE_WITH_YOUR_CF_ZONE_ID
+  base_url: https://example.com
+  related_urls:
+  - /sitemap.xml
+  - /index.xml
+  - /posts/index.xml
+  - /
+  - /posts/

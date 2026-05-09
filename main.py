@@ -17,6 +17,9 @@ import httpx
 import structlog
 import bcrypt
 from dotenv import load_dotenv
+import sys, os as _os
+sys.path.insert(0, _os.path.dirname(__file__))
+from core.plugin_loader import registry as _plugin_registry
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -50,6 +53,7 @@ MAX_FRONTMATTER_BYTES        = 10 * 1024
 MAX_FRONTMATTER_DEPTH        = 3
 
 load_dotenv()
+_plugin_registry.load()
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
@@ -98,7 +102,7 @@ TOKENS_FILE           = Path(__file__).parent / "tokens.json"
 
 CF_TOKEN    = os.environ.get("CF_TOKEN", "")
 CF_ZONE_ID  = os.environ.get("CF_ZONE_ID", "")
-CF_BASE_URL = "https://hugo-test.arleo.eu"
+CF_BASE_URL = "https://www.arleo.eu"
 
 STATIC_DIR                = f"{HUGO_SITE}/static"
 ASSET_EXTENSIONS_IMAGE    = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.avif'}
@@ -292,17 +296,6 @@ def run_deploy() -> str:
         raise HTTPException(500, f"Deploy failed: {result.stderr}")
     return result.stdout.strip()
 
-async def purge_cloudflare(paths: list[str] = None):
-    if not CF_TOKEN or not CF_ZONE_ID:
-        return {"skipped": "CF credentials not configured"}
-
-    url     = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/purge_cache"
-    headers = {"Authorization": f"Bearer {CF_TOKEN}", "Content-Type": "application/json"}
-    body    = {"files": [f"{CF_BASE_URL}{p}" for p in paths]} if paths else {"purge_everything": True}
-
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(url, headers=headers, json=body)
-        return resp.json()
 
 def read_frontmatter(filepath: str):
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -695,17 +688,20 @@ async def tool_create_page(args):
     t_write = time.perf_counter()
     deploy_output = run_deploy()
     t_build = time.perf_counter()
-    cf_result     = await purge_cloudflare(["/" if route == '_index' else f"/{route}/"])
     t_purge = time.perf_counter()
     slog.info("timing", op="create_page", route=route, lang=lang,
               write_ms=int((t_write-t0)*1000), build_ms=int((t_build-t_write)*1000),
               purge_ms=int((t_purge-t_build)*1000), total_ms=int((t_purge-t0)*1000))
 
+    _urls = [f"{CF_BASE_URL}{route if route.startswith('/') else '/' + route}/"]
+    _plugin_results = await _plugin_registry.fire_event("created", _urls, {"route": route, "lang": lang, "title": title})
+    cf_result = next((r for r in _plugin_results if r.get("plugin") == "cloudflare"), {"skipped": "plugin not active"})
     return {
         "status":   "created",
         "file":     filepath.replace(CONTENT_DIR + '/', ''),
         "deploy":   deploy_output,
         "cf_purge": cf_result,
+        "plugins":  _plugin_results,
     }
 
 async def tool_update_page(args):
@@ -766,17 +762,20 @@ async def tool_update_page(args):
     t_write = time.perf_counter()
     deploy_output = run_deploy()
     t_build = time.perf_counter()
-    cf_result     = await purge_cloudflare(["/" if route == '_index' else f"/{route.strip('/')}/"])
     t_purge = time.perf_counter()
     slog.info("timing", op="update_page", route=route, lang=lang,
               write_ms=int((t_write-t0)*1000), build_ms=int((t_build-t_write)*1000),
               purge_ms=int((t_purge-t_build)*1000), total_ms=int((t_purge-t0)*1000))
 
+    _urls = [f"{CF_BASE_URL}{route if route.startswith('/') else '/' + route}/"]
+    _plugin_results = await _plugin_registry.fire_event("updated", _urls, {"route": route, "lang": lang})
+    cf_result = next((r for r in _plugin_results if r.get("plugin") == "cloudflare"), {"skipped": "plugin not active"})
     return {
         "status":   "updated",
         "file":     filepath.replace(CONTENT_DIR + '/', ''),
         "deploy":   deploy_output,
         "cf_purge": cf_result,
+        "plugins":  _plugin_results,
     }
 
 async def tool_delete_page(args):
@@ -795,17 +794,20 @@ async def tool_delete_page(args):
     t_write = time.perf_counter()
     deploy_output = run_deploy()
     t_build = time.perf_counter()
-    cf_result     = await purge_cloudflare()
     t_purge = time.perf_counter()
     slog.info("timing", op="delete_page", route=route, lang=lang,
               delete_ms=int((t_write-t0)*1000), build_ms=int((t_build-t_write)*1000),
               purge_ms=int((t_purge-t_build)*1000), total_ms=int((t_purge-t0)*1000))
 
+    _urls = [f"{CF_BASE_URL}{route if route.startswith('/') else '/' + route}/"]
+    _plugin_results = await _plugin_registry.fire_event("deleted", _urls, {"route": route, "lang": lang})
+    cf_result = next((r for r in _plugin_results if r.get("plugin") == "cloudflare"), {"skipped": "plugin not active"})
     return {
         "status":   "deleted",
         "file":     filepath.replace(CONTENT_DIR + '/', ''),
         "deploy":   deploy_output,
         "cf_purge": cf_result,
+        "plugins":  _plugin_results,
     }
 
 async def tool_build_site(args):
@@ -813,7 +815,7 @@ async def tool_build_site(args):
     t0 = time.perf_counter()
     deploy_output = run_deploy()
     t_build = time.perf_counter()
-    cf_result     = await purge_cloudflare() if purge_cf else {"skipped": True}
+    cf_result     = {"skipped": "use cloudflare plugin"}
     t_purge = time.perf_counter()
     slog.info("timing", op="build_site",
               build_ms=int((t_build-t0)*1000), purge_ms=int((t_purge-t_build)*1000),
