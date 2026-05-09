@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.9.0] — 2026-05-09
+
+### Security
+- **C1** : slowapi 60 req/min per client IP (`X-Real-IP` header from nginx proxy)
+- **C2** : Multi-token auth system — `tokens.json` with bcrypt cost-12 hashes; `token_mgr.py` CLI (`list`, `add`, `revoke`, `migrate`)
+- **C3** : structlog JSON audit events — `write_op` and `timing` events as machine-readable JSON (Vector/BetterStack ready)
+- **C4** : Pydantic v2 input models (`CreatePageArgs`, `UpdatePageArgs`) — title max 500, content max 512 KB, tags max 50×100 chars, route min/max length
+- **C5** : bcrypt cost-12 for tokens stored in `tokens.json` (via C2 token system)
+- **C6** : TLS NUC↔VM — EC P-256 self-signed cert on VM (`tls/server.crt`), uvicorn `--ssl-certfile/keyfile`, nginx proxy verifies cert via `MCP_CA_CERT`
+- **C7** : `requirements.lock` with SHA-256 hashes via `pip-compile --generate-hashes`
+- **C8** : Docs disabled (`docs_url=None`, `redoc_url=None`, `openapi_url=None`); generic exception handler (no traceback leak); nginx `proxy_hide_header Server/X-Powered-By`
+- **C9** : nginx `if` enforcement for `/mcp` — method must be POST (405), Content-Type must contain `application/json` (415); OWASP CRS (ModSec) applies globally
+- **C10** : `backup.sh` — GPG-encrypted tar of config + content + tokens.json (no private key), 30-day retention
+
+### Added
+- `token_mgr.py` — CLI for token lifecycle management (add/revoke/list/migrate)
+- `backup.sh` — DR backup script with GPG encryption and retention
+- `requirements.lock` — hashed lockfile for supply chain verification
+
 ## [1.8.0] — 2026-05-09
 
 ### Added

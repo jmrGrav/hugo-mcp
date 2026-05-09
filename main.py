@@ -6,23 +6,43 @@ Gère les pages Hugo depuis Claude.ai
 
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse, Response
-import re, hmac, time, subprocess, os, glob, yaml, json, logging, traceback
+from pydantic import BaseModel, Field, field_validator, ValidationError
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+import re, hmac, time, subprocess, os, yaml, json, logging, traceback
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Optional
 import httpx
+import structlog
+import bcrypt
 from dotenv import load_dotenv
+
+# ── Logging ───────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
-log       = logging.getLogger("hugo-mcp")
-audit_log = logging.getLogger("hugo-mcp.audit")
+log = logging.getLogger("hugo-mcp")
+
+structlog.configure(
+    processors=[
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.JSONRenderer(),
+    ],
+    wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+slog = structlog.get_logger()
 
 START_TIME = time.time()
 METRICS    = {"create_page": 0, "update_page": 0, "delete_page": 0, "errors": 0}
 
-ALLOWED_MONITOR_IPS      = {"127.0.0.1", "192.168.122.1"}
+ALLOWED_MONITOR_IPS          = {"127.0.0.1", "192.168.122.1"}
 SENSITIVE_FRONTMATTER_FIELDS = {"aliases", "cascade", "build", "outputs", "headless", "_target"}
 RESERVED_DEDICATED_PARAMS    = {"title", "tags", "draft"}
 IMMUTABLE_UPDATE_FIELDS      = {"date"}
@@ -31,7 +51,30 @@ MAX_FRONTMATTER_DEPTH        = 3
 
 load_dotenv()
 
-app = FastAPI(title="Hugo MCP Server")
+# ── FastAPI app ───────────────────────────────────────────────────────────────
+
+# C8: disable interactive docs — no /docs, /redoc, /openapi.json
+app = FastAPI(
+    title="Hugo MCP Server",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+# C1: rate limiting — 60 req/min per client IP (read X-Real-IP set by nginx)
+def _get_client_ip(request: Request) -> str:
+    return request.headers.get("X-Real-IP") or (request.client.host if request.client else "unknown")
+
+limiter = Limiter(key_func=_get_client_ip)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# C8: generic exception handler — never leak tracebacks to clients
+@app.exception_handler(Exception)
+async def _generic_exc_handler(request: Request, exc: Exception):
+    log.error("unhandled_exception path=%s error=%s\n%s",
+              request.url.path, exc, traceback.format_exc())
+    return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 MAX_REQUEST_BODY_SIZE = 512 * 1024  # 512 KB
 
@@ -45,12 +88,13 @@ async def limit_request_body(request: Request, call_next):
         )
     return await call_next(request)
 
-HUGO_SITE   = "/home/jm/hugo-site"
+HUGO_SITE             = "/home/jm/hugo-site"
 CONTENT_DIR           = f"{HUGO_SITE}/content"
 _CONTENT_DIR_RESOLVED = Path(CONTENT_DIR).resolve()
 LANG_REGEX            = re.compile(r'^[a-z]{2,3}$')
 DEPLOY_SH             = "/home/jm/deploy.sh"
-MCP_TOKEN   = os.environ.get("MCP_TOKEN", "")
+MCP_TOKEN             = os.environ.get("MCP_TOKEN", "")
+TOKENS_FILE           = Path(__file__).parent / "tokens.json"
 
 CF_TOKEN    = os.environ.get("CF_TOKEN", "")
 CF_ZONE_ID  = os.environ.get("CF_ZONE_ID", "")
@@ -60,6 +104,44 @@ STATIC_DIR                = f"{HUGO_SITE}/static"
 ASSET_EXTENSIONS_IMAGE    = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.avif'}
 ASSET_EXTENSIONS_DOCUMENT = {'.pdf', '.txt', '.csv', '.zip'}
 MAX_ASSETS_RESULT         = 500
+
+# ── C4: Pydantic input models ─────────────────────────────────────────────────
+
+def _check_tags(v: list | None) -> list | None:
+    if v is None:
+        return v
+    if len(v) > 50:
+        raise ValueError("too many tags (max 50)")
+    for tag in v:
+        if not isinstance(tag, str) or len(tag) > 100:
+            raise ValueError("each tag must be a string ≤ 100 chars")
+    return v
+
+class CreatePageArgs(BaseModel):
+    route:        str              = Field(..., min_length=1, max_length=500)
+    lang:         str              = Field("fr", pattern=r'^[a-z]{2,3}$')
+    title:        str              = Field("", max_length=500)
+    content:      str              = Field("", max_length=524288)
+    tags:         list[str]        = Field(default_factory=list)
+    draft:        Optional[bool]   = None
+    frontmatter:  Optional[dict | str] = None
+
+    @field_validator("tags")
+    @classmethod
+    def _tags(cls, v): return _check_tags(v)
+
+class UpdatePageArgs(BaseModel):
+    route:        str              = Field(..., min_length=1, max_length=500)
+    lang:         Optional[str]    = Field(None, pattern=r'^[a-z]{2,3}$')
+    title:        Optional[str]    = Field(None, max_length=500)
+    content:      str              = Field("", max_length=524288)
+    tags:         Optional[list[str]] = None
+    draft:        Optional[bool]   = None
+    frontmatter:  Optional[dict | str] = None
+
+    @field_validator("tags")
+    @classmethod
+    def _tags(cls, v): return _check_tags(v)
 
 # ── Input validation ──────────────────────────────────────────────────────────
 
@@ -156,14 +238,48 @@ def _deep_merge(existing: dict, updates: dict) -> dict:
             result[k] = v
     return result
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
+# ── C2/C5: Auth — tokens.json with bcrypt, fallback to MCP_TOKEN env var ──────
+
+def _load_tokens() -> list[dict]:
+    try:
+        data = json.loads(TOKENS_FILE.read_text())
+        return data.get("tokens", [])
+    except (OSError, json.JSONDecodeError):
+        return []
 
 def verify_token(request: Request):
     auth  = request.headers.get("Authorization", "")
-    token = auth.replace("Bearer ", "").strip()
-    if not token or not MCP_TOKEN or not hmac.compare_digest(token.encode(), MCP_TOKEN.encode()):
+    raw   = auth.replace("Bearer ", "").strip()
+    if not raw:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    return token
+
+    raw_bytes = raw.encode()
+
+    # Check tokens.json (bcrypt hashes)
+    now = datetime.now(timezone.utc)
+    for entry in _load_tokens():
+        if entry.get("revoked"):
+            continue
+        expires = entry.get("expires")
+        if expires:
+            try:
+                if datetime.fromisoformat(expires) < now:
+                    continue
+            except ValueError:
+                continue
+        stored = entry.get("hash", "")
+        if stored:
+            try:
+                if bcrypt.checkpw(raw_bytes, stored.encode()):
+                    return entry.get("id", "token")
+            except Exception:
+                continue
+
+    # Fallback: MCP_TOKEN env var (plain hmac, for migration / backwards compat)
+    if MCP_TOKEN and hmac.compare_digest(raw_bytes, MCP_TOKEN.encode()):
+        return "env_token"
+
+    raise HTTPException(status_code=401, detail="Unauthorized")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -189,7 +305,6 @@ async def purge_cloudflare(paths: list[str] = None):
         return resp.json()
 
 def read_frontmatter(filepath: str):
-    # OSError / PermissionError propagate intentionally — callers skip the file
     with open(filepath, 'r', encoding='utf-8') as f:
         content = f.read()
 
@@ -265,6 +380,7 @@ def metrics(request: Request):
     return Response("\n".join(lines) + "\n", media_type="text/plain")
 
 @app.post("/mcp")
+@limiter.limit("60/minute")
 async def mcp_handler(request: Request, _=Depends(verify_token)):
     body   = await request.json()
     method = body.get("method", "")
@@ -425,9 +541,8 @@ async def handle_tool_call(params, request=None):
 
     _WRITE_TOOLS = {"create_page", "update_page", "delete_page"}
     if tool_name in _WRITE_TOOLS:
-        ip = request.client.host if request else "unknown"
-        audit_log.info("action=%s route=%s lang=%s ip=%s",
-                       tool_name, args.get("route", "-"), args.get("lang", "-"), ip)
+        ip = _get_client_ip(request) if request else "unknown"
+        slog.info("write_op", op=tool_name, route=args.get("route", "-"), lang=args.get("lang", "-"), ip=ip)
         METRICS[tool_name] = METRICS.get(tool_name, 0) + 1
 
     tools = {
@@ -531,13 +646,19 @@ async def tool_get_page(args):
     }
 
 async def tool_create_page(args):
-    route   = _safe_route(args.get("route", ""))
-    lang    = _safe_lang(args.get("lang", "fr")) or "fr"
-    title   = args.get("title", "")
-    content = args.get("content", "")
-    tags    = args.get("tags")
-    draft   = args.get("draft")
-    fm_user = args.get("frontmatter")
+    # C4: Pydantic validation
+    try:
+        v = CreatePageArgs.model_validate(args)
+    except ValidationError as e:
+        raise HTTPException(400, f"Invalid arguments: {e}")
+
+    route   = _safe_route(v.route)
+    lang    = _safe_lang(v.lang) or "fr"
+    title   = v.title
+    content = v.content
+    tags    = v.tags or None
+    draft   = v.draft
+    fm_user = v.frontmatter
 
     if isinstance(fm_user, str):
         try:
@@ -576,8 +697,9 @@ async def tool_create_page(args):
     t_build = time.perf_counter()
     cf_result     = await purge_cloudflare(["/" if route == '_index' else f"/{route}/"])
     t_purge = time.perf_counter()
-    audit_log.info("timing op=create_page route=%s lang=%s write=%dms build=%dms purge=%dms total=%dms",
-        route, lang, (t_write-t0)*1000, (t_build-t_write)*1000, (t_purge-t_build)*1000, (t_purge-t0)*1000)
+    slog.info("timing", op="create_page", route=route, lang=lang,
+              write_ms=int((t_write-t0)*1000), build_ms=int((t_build-t_write)*1000),
+              purge_ms=int((t_purge-t_build)*1000), total_ms=int((t_purge-t0)*1000))
 
     return {
         "status":   "created",
@@ -587,10 +709,16 @@ async def tool_create_page(args):
     }
 
 async def tool_update_page(args):
-    route   = _safe_route(args.get("route", ""))
-    lang    = _safe_lang(args.get("lang"))
-    content = args.get("content", "")
-    fm_user = args.get("frontmatter")
+    # C4: Pydantic validation
+    try:
+        v = UpdatePageArgs.model_validate(args)
+    except ValidationError as e:
+        raise HTTPException(400, f"Invalid arguments: {e}")
+
+    route   = _safe_route(v.route)
+    lang    = _safe_lang(v.lang)
+    content = v.content
+    fm_user = v.frontmatter
 
     if isinstance(fm_user, str):
         try:
@@ -603,9 +731,9 @@ async def tool_update_page(args):
         fm_user,
         is_update=True,
         dedicated_params={
-            "title": args.get("title"),
-            "tags":  args.get("tags"),
-            "draft": args.get("draft"),
+            "title": v.title,
+            "tags":  v.tags,
+            "draft": v.draft,
         },
     )
 
@@ -622,12 +750,12 @@ async def tool_update_page(args):
     fm, _ = read_frontmatter(filepath)
 
     final_fm = dict(fm)
-    if "title" in args:
-        final_fm["title"] = args["title"]
-    if "tags" in args:
-        final_fm["tags"] = args["tags"]
-    if "draft" in args:
-        final_fm["draft"] = args["draft"]
+    if v.title is not None:
+        final_fm["title"] = v.title
+    if v.tags is not None:
+        final_fm["tags"] = v.tags
+    if v.draft is not None:
+        final_fm["draft"] = v.draft
     if "lastmod" not in fm_user:
         final_fm["lastmod"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S+02:00")
 
@@ -640,8 +768,9 @@ async def tool_update_page(args):
     t_build = time.perf_counter()
     cf_result     = await purge_cloudflare(["/" if route == '_index' else f"/{route.strip('/')}/"])
     t_purge = time.perf_counter()
-    audit_log.info("timing op=update_page route=%s lang=%s write=%dms build=%dms purge=%dms total=%dms",
-        route, lang, (t_write-t0)*1000, (t_build-t_write)*1000, (t_purge-t_build)*1000, (t_purge-t0)*1000)
+    slog.info("timing", op="update_page", route=route, lang=lang,
+              write_ms=int((t_write-t0)*1000), build_ms=int((t_build-t_write)*1000),
+              purge_ms=int((t_purge-t_build)*1000), total_ms=int((t_purge-t0)*1000))
 
     return {
         "status":   "updated",
@@ -668,8 +797,9 @@ async def tool_delete_page(args):
     t_build = time.perf_counter()
     cf_result     = await purge_cloudflare()
     t_purge = time.perf_counter()
-    audit_log.info("timing op=delete_page route=%s lang=%s delete=%dms build=%dms purge=%dms total=%dms",
-        route, lang, (t_write-t0)*1000, (t_build-t_write)*1000, (t_purge-t_build)*1000, (t_purge-t0)*1000)
+    slog.info("timing", op="delete_page", route=route, lang=lang,
+              delete_ms=int((t_write-t0)*1000), build_ms=int((t_build-t_write)*1000),
+              purge_ms=int((t_purge-t_build)*1000), total_ms=int((t_purge-t0)*1000))
 
     return {
         "status":   "deleted",
@@ -685,8 +815,9 @@ async def tool_build_site(args):
     t_build = time.perf_counter()
     cf_result     = await purge_cloudflare() if purge_cf else {"skipped": True}
     t_purge = time.perf_counter()
-    audit_log.info("timing op=build_site build=%dms purge=%dms total=%dms",
-        (t_build-t0)*1000, (t_purge-t_build)*1000, (t_purge-t0)*1000)
+    slog.info("timing", op="build_site",
+              build_ms=int((t_build-t0)*1000), purge_ms=int((t_purge-t_build)*1000),
+              total_ms=int((t_purge-t0)*1000))
 
     return {"status": "built", "deploy": deploy_output, "cf_purge": cf_result}
 
