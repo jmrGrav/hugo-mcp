@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.8.0] — 2026-05-09
+
+### Added
+- `list_assets` tool — liste les fichiers statiques (`static/`) et les ressources des page bundles (`content/`) avec filtres `path_prefix` et `type`
+- Support de la route racine : `route='/'` ou `route='_index'` pour cibler `_index.{lang}.md`
+- Timing instrumentation pour les opérations write / build / purge (logs structurés avec durées ms)
+
+### Docs
+- Backlogs sécurité et webhook ajoutés dans `docs/`
+
 ## [1.7.0] — 2026-05-07
 
 ### Added
