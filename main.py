@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator, ValidationError
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-import re, hmac, time, subprocess, os, yaml, json, logging, traceback
+import re, hmac, time, subprocess, os, yaml, json, logging, traceback, base64
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
@@ -80,7 +80,7 @@ async def _generic_exc_handler(request: Request, exc: Exception):
               request.url.path, exc, traceback.format_exc())
     return JSONResponse({"error": "Internal server error"}, status_code=500)
 
-MAX_REQUEST_BODY_SIZE = 512 * 1024  # 512 KB
+MAX_REQUEST_BODY_SIZE = 10 * 1024 * 1024  # 10 MB (upload_asset)
 
 @app.middleware("http")
 async def limit_request_body(request: Request, call_next):
@@ -108,6 +108,8 @@ STATIC_DIR                = f"{HUGO_SITE}/static"
 ASSET_EXTENSIONS_IMAGE    = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.avif'}
 ASSET_EXTENSIONS_DOCUMENT = {'.pdf', '.txt', '.csv', '.zip'}
 MAX_ASSETS_RESULT         = 500
+UPLOAD_ASSET_EXTENSIONS   = {".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif"}
+MAX_UPLOAD_BYTES          = 10 * 1024 * 1024  # 10 MB decoded
 
 # ── C4: Pydantic input models ─────────────────────────────────────────────────
 
@@ -146,6 +148,12 @@ class UpdatePageArgs(BaseModel):
     @field_validator("tags")
     @classmethod
     def _tags(cls, v): return _check_tags(v)
+
+
+class UploadAssetArgs(BaseModel):
+    filename:  str = Field(..., min_length=1, max_length=255)
+    data:      str = Field(..., description="base64-encoded file content")
+    subfolder: str = Field("images", max_length=100)
 
 # ── Input validation ──────────────────────────────────────────────────────────
 
@@ -512,6 +520,20 @@ async def handle_list_tools(params):
             },
         },
         {
+            "name":        "upload_asset",
+            "description": "Uploader une image dans static/{subfolder}/ du site Hugo",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "filename":  {"type": "string", "description": "Nom du fichier ex: schema.png"},
+                    "data":      {"type": "string", "description": "Contenu encodé en base64"},
+                    "subfolder": {"type": "string", "default": "images",
+                                  "description": "Sous-dossier dans static/ (defaut: images)"},
+                },
+                "required": ["filename", "data"],
+            },
+        },
+                {
             "name":        "list_assets",
             "description": "Lister les assets du site Hugo (static/ et page bundles dans content/), triés par date de modification décroissante",
             "inputSchema": {
@@ -546,6 +568,7 @@ async def handle_tool_call(params, request=None):
         "delete_page": tool_delete_page,
         "build_site":  tool_build_site,
         "list_assets": tool_list_assets,
+        "upload_asset": tool_upload_asset,
     }
 
     tool = tools.get(tool_name)
@@ -822,6 +845,62 @@ async def tool_build_site(args):
               total_ms=int((t_purge-t0)*1000))
 
     return {"status": "built", "deploy": deploy_output, "cf_purge": cf_result}
+
+async def tool_upload_asset(args):
+    try:
+        v = UploadAssetArgs.model_validate(args)
+    except ValidationError as e:
+        raise HTTPException(400, f"Invalid arguments: {e}")
+
+    # Validate filename — no path separators or traversal
+    if "/" in v.filename or "\\" in v.filename or ".." in v.filename:
+        raise HTTPException(400, "Invalid filename: must not contain /, backslash, or ..")
+
+    suffix = Path(v.filename).suffix.lower()
+    if suffix not in UPLOAD_ASSET_EXTENSIONS:
+        raise HTTPException(400, f"Unsupported extension {suffix!r}. Allowed: {sorted(UPLOAD_ASSET_EXTENSIONS)}")
+
+    # Validate subfolder
+    if ".." in v.subfolder or v.subfolder.startswith("/"):
+        raise HTTPException(400, "Invalid subfolder: must be relative without ..")
+
+    # Decode base64
+    try:
+        file_bytes = base64.b64decode(v.data, validate=True)
+    except Exception:
+        raise HTTPException(400, "Invalid base64 data")
+
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"File too large: {len(file_bytes)} bytes (max {MAX_UPLOAD_BYTES})")
+
+    # Build destination — prevent path traversal
+    static_root = Path(STATIC_DIR).resolve()
+    dest_dir    = (static_root / v.subfolder).resolve()
+    try:
+        dest_dir.relative_to(static_root)
+    except ValueError:
+        raise HTTPException(400, "Invalid subfolder: path traversal detected")
+
+    dest_path = (dest_dir / v.filename).resolve()
+    try:
+        dest_path.relative_to(static_root)
+    except ValueError:
+        raise HTTPException(400, "Invalid filename: path traversal detected")
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path.write_bytes(file_bytes)
+
+    deploy_output = run_deploy()
+    slog.info("upload_asset", filename=v.filename, subfolder=v.subfolder, size=len(file_bytes))
+
+    return {
+        "status":     "ok",
+        "path":       str(dest_path.relative_to(Path(HUGO_SITE))),
+        "public_url": f"/{v.subfolder}/{v.filename}",
+        "size_bytes": len(file_bytes),
+        "deploy":     deploy_output,
+    }
+
 
 async def tool_list_assets(args):
     asset_type  = args.get("type", "all")
