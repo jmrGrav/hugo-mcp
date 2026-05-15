@@ -476,14 +476,33 @@ async def tool_generate_featured_image(args):
         raise HTTPException(500, "Skill produced empty file")
 
     frontmatter_updated = False
+    langs_updated = []
     if v.route:
-        page_path = find_page(_safe_route(v.route), v.lang)
-        if not page_path:
+        route_safe = _safe_route(v.route)
+        # Find all language variants (fr + en)
+        page_paths = []
+        for lang in ("fr", "en"):
+            p = find_page(route_safe, lang)
+            if p:
+                page_paths.append((lang, p))
+        # Fallback: lang-neutral file
+        if not page_paths:
+            p = find_page(route_safe, None)
+            if p:
+                page_paths.append((None, p))
+        if not page_paths:
             raise HTTPException(404, f"Page not found: {v.route}")
-        fm, existing_content = read_frontmatter(page_path)
-        fm["featuredImage"] = f"/images/{v.filename}"
-        fm["lastmod"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S+02:00")
-        write_page(page_path, fm, existing_content)
+        now_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%S+02:00")
+        for lang, page_path in page_paths:
+            fm, existing_content = read_frontmatter(page_path)
+            # BUG1: remove all case variants before setting
+            fm.pop("featuredimage", None)
+            fm.pop("featuredImage", None)
+            fm.pop("FeaturedImage", None)
+            fm["featuredImage"] = f"/images/{v.filename}"
+            fm["lastmod"] = now_str
+            write_page(page_path, fm, existing_content)
+            langs_updated.append(lang or "default")
         frontmatter_updated = True
 
     deploy_output = run_deploy()
@@ -495,6 +514,7 @@ async def tool_generate_featured_image(args):
         "size_bytes":           size,
         "style":                v.style,
         "frontmatter_updated":  frontmatter_updated,
+        "langs_updated":        langs_updated,
         "deploy":               deploy_output,
     }
 
