@@ -157,12 +157,14 @@ class UploadAssetArgs(BaseModel):
     subfolder: str = Field("images", max_length=100)
 
 class GenerateFeaturedImageArgs(BaseModel):
-    style:    str       = Field("tech")
-    title:    str       = Field(..., min_length=1, max_length=80)
-    subtitle: str       = Field("", max_length=120)
-    tags:     list[str] = Field(default_factory=list)
-    accent:   str       = Field("")
-    filename: str       = Field(..., min_length=1, max_length=255)
+    style:    str            = Field("tech")
+    title:    str            = Field(..., min_length=1, max_length=80)
+    subtitle: str            = Field("", max_length=120)
+    tags:     list[str]      = Field(default_factory=list)
+    accent:   str            = Field("")
+    filename: str            = Field(..., min_length=1, max_length=255)
+    route:    Optional[str]  = Field(None, min_length=1, max_length=500)
+    lang:     Optional[str]  = Field(None, pattern=r'^[a-z]{2,3}$')
 
     @field_validator("tags")
     @classmethod
@@ -473,15 +475,27 @@ async def tool_generate_featured_image(args):
     if size == 0:
         raise HTTPException(500, "Skill produced empty file")
 
+    frontmatter_updated = False
+    if v.route:
+        page_path = find_page(_safe_route(v.route), v.lang)
+        if not page_path:
+            raise HTTPException(404, f"Page not found: {v.route}")
+        fm, existing_content = read_frontmatter(page_path)
+        fm["featuredImage"] = f"/images/{v.filename}"
+        fm["lastmod"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S+02:00")
+        write_page(page_path, fm, existing_content)
+        frontmatter_updated = True
+
     deploy_output = run_deploy()
 
     return {
-        "status":     "ok",
-        "filename":   v.filename,
-        "public_url": f"/images/{v.filename}",
-        "size_bytes": size,
-        "style":      v.style,
-        "deploy":     deploy_output,
+        "status":               "ok",
+        "filename":             v.filename,
+        "public_url":           f"/images/{v.filename}",
+        "size_bytes":           size,
+        "style":                v.style,
+        "frontmatter_updated":  frontmatter_updated,
+        "deploy":               deploy_output,
     }
 
 async def handle_list_tools(params):
@@ -632,6 +646,10 @@ async def handle_list_tools(params):
                                 "description": "Couleur accent hex optionnelle (#7aa2f7, #9ece6a, #f7768e, #e0af68, #bb9af7, #7dcfff)"},
                     "filename": {"type": "string",
                                 "description": "Nom du fichier PNG de sortie ex: mon-article-featured.png"},
+                    "route":    {"type": "string",
+                                "description": "Route de la page à mettre à jour (ex: /posts/mon-article). Si fourni, met à jour featuredImage dans le frontmatter."},
+                    "lang":     {"type": "string",
+                                "description": "Langue de la page (fr, en). Défaut: fr."},
                 },
                 "required": ["title", "filename"],
             },
