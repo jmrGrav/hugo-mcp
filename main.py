@@ -140,7 +140,7 @@ class UpdatePageArgs(BaseModel):
     route:        str              = Field(..., min_length=1, max_length=500)
     lang:         Optional[str]    = Field(None, pattern=r'^[a-z]{2,3}$')
     title:        Optional[str]    = Field(None, max_length=500)
-    content:      str              = Field("", max_length=524288)
+    content:      Optional[str]    = Field(None, max_length=524288)
     tags:         Optional[list[str]] = None
     draft:        Optional[bool]   = None
     frontmatter:  Optional[dict | str] = None
@@ -494,7 +494,7 @@ async def handle_list_tools(params):
                         ),
                     },
                 },
-                "required": ["route", "content"],
+                "required": ["route"],
             },
         },
         {
@@ -766,7 +766,9 @@ async def tool_update_page(args):
     if not filepath:
         raise HTTPException(404, f"Page not found: {route}")
 
-    fm, _ = read_frontmatter(filepath)
+    fm, existing_content = read_frontmatter(filepath)
+
+    final_content = content if content is not None else existing_content
 
     final_fm = dict(fm)
     if v.title is not None:
@@ -781,7 +783,7 @@ async def tool_update_page(args):
     final_fm = _deep_merge(final_fm, fm_user)
 
     t0 = time.perf_counter()
-    write_page(filepath, final_fm, content)
+    write_page(filepath, final_fm, final_content)
     t_write = time.perf_counter()
     deploy_output = run_deploy()
     t_build = time.perf_counter()
