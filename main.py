@@ -110,6 +110,7 @@ ASSET_EXTENSIONS_DOCUMENT = {'.pdf', '.txt', '.csv', '.zip'}
 MAX_ASSETS_RESULT         = 500
 UPLOAD_ASSET_EXTENSIONS   = {".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif"}
 MAX_UPLOAD_BYTES          = 10 * 1024 * 1024  # 10 MB decoded
+SKILL_ARLEO_IMAGE         = "/home/jm/.claude/skills/arleo-image/arleo_image.py"
 
 # ── C4: Pydantic input models ─────────────────────────────────────────────────
 
@@ -154,6 +155,18 @@ class UploadAssetArgs(BaseModel):
     filename:  str = Field(..., min_length=1, max_length=255)
     data:      str = Field(..., description="base64-encoded file content")
     subfolder: str = Field("images", max_length=100)
+
+class GenerateFeaturedImageArgs(BaseModel):
+    style:    str       = Field("tech")
+    title:    str       = Field(..., min_length=1, max_length=80)
+    subtitle: str       = Field("", max_length=120)
+    tags:     list[str] = Field(default_factory=list)
+    accent:   str       = Field("")
+    filename: str       = Field(..., min_length=1, max_length=255)
+
+    @field_validator("tags")
+    @classmethod
+    def _tags(cls, v): return _check_tags(v)
 
 # ── Input validation ──────────────────────────────────────────────────────────
 
@@ -416,6 +429,61 @@ async def handle_initialize(params):
         "serverInfo":      {"name": "hugo-mcp", "version": "1.0.0"},
     }
 
+async def tool_generate_featured_image(args):
+    try:
+        v = GenerateFeaturedImageArgs.model_validate(args)
+    except ValidationError as e:
+        raise HTTPException(400, f"Invalid arguments: {e}")
+
+    # Validate filename: no path traversal, must end with .png
+    if ".." in v.filename or "/" in v.filename or "\\" in v.filename:
+        raise HTTPException(400, "filename must not contain path separators or ..")
+    if not v.filename.lower().endswith(".png"):
+        raise HTTPException(400, "filename must end with .png")
+
+    # Validate style
+    if v.style not in ("tech", "geo"):
+        raise HTTPException(400, f"style must be 'tech' or 'geo', got {v.style!r}")
+
+    # Validate accent if provided
+    if v.accent and not re.fullmatch(r"#[0-9a-fA-F]{6}", v.accent):
+        raise HTTPException(400, f"accent must be a 6-digit hex color like #7aa2f7, got {v.accent!r}")
+
+    outpath = f"{STATIC_DIR}/images/{v.filename}"
+
+    # Run skill in isolated namespace to avoid polluting module globals
+    ns = {}
+    try:
+        exec(open(SKILL_ARLEO_IMAGE).read(), ns)
+        ns["generate"](
+            v.style,
+            v.title,
+            v.subtitle,
+            v.tags,
+            v.accent or None,
+            outpath,
+        )
+    except Exception as e:
+        log.error("generate_featured_image skill error: %s", e)
+        raise HTTPException(500, f"Skill error: {e}")
+
+    if not os.path.exists(outpath):
+        raise HTTPException(500, f"Skill ran but file not created: {outpath}")
+    size = os.path.getsize(outpath)
+    if size == 0:
+        raise HTTPException(500, "Skill produced empty file")
+
+    deploy_output = run_deploy()
+
+    return {
+        "status":     "ok",
+        "filename":   v.filename,
+        "public_url": f"/images/{v.filename}",
+        "size_bytes": size,
+        "style":      v.style,
+        "deploy":     deploy_output,
+    }
+
 async def handle_list_tools(params):
     return {"tools": [
         {
@@ -548,6 +616,26 @@ async def handle_list_tools(params):
                 },
             },
         },
+        {
+            "name":        "generate_featured_image",
+            "description": "Générer une featured image Tokyo Night pour un article arleo.eu via le skill arleo-image (sans base64)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "style":    {"type": "string", "enum": ["tech", "geo"], "default": "tech",
+                                "description": "Style visuel : tech (infra/sécu) ou geo (général)"},
+                    "title":    {"type": "string", "description": "Titre principal (max 80 chars)"},
+                    "subtitle": {"type": "string", "description": "Sous-titre (max 120 chars, optionnel)"},
+                    "tags":     {"type": "array", "items": {"type": "string"},
+                                "description": "Tags affichés sur l'image"},
+                    "accent":   {"type": "string",
+                                "description": "Couleur accent hex optionnelle (#7aa2f7, #9ece6a, #f7768e, #e0af68, #bb9af7, #7dcfff)"},
+                    "filename": {"type": "string",
+                                "description": "Nom du fichier PNG de sortie ex: mon-article-featured.png"},
+                },
+                "required": ["title", "filename"],
+            },
+        },
     ]}
 
 async def handle_tool_call(params, request=None):
@@ -569,6 +657,7 @@ async def handle_tool_call(params, request=None):
         "build_site":  tool_build_site,
         "list_assets": tool_list_assets,
         "upload_asset": tool_upload_asset,
+        "generate_featured_image": tool_generate_featured_image,
     }
 
     tool = tools.get(tool_name)
