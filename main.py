@@ -437,11 +437,11 @@ async def tool_generate_featured_image(args):
     except ValidationError as e:
         raise HTTPException(400, f"Invalid arguments: {e}")
 
-    # Validate filename: no path traversal, must end with .png
+    # Validate filename: no path traversal, must end with .jpg
     if ".." in v.filename or "/" in v.filename or "\\" in v.filename:
         raise HTTPException(400, "filename must not contain path separators or ..")
-    if not v.filename.lower().endswith(".png"):
-        raise HTTPException(400, "filename must end with .png")
+    if not v.filename.lower().endswith(".jpg"):
+        raise HTTPException(400, "filename must end with .jpg")
 
     # Validate style
     if v.style not in ("tech", "geo"):
@@ -451,30 +451,23 @@ async def tool_generate_featured_image(args):
     if v.accent and not re.fullmatch(r"#[0-9a-fA-F]{6}", v.accent):
         raise HTTPException(400, f"accent must be a 6-digit hex color like #7aa2f7, got {v.accent!r}")
 
-    stem = v.filename[:-4]  # strip .png
-    filename_light = f"{stem}-light.png"
-    outpath_dark  = f"{STATIC_DIR}/images/{v.filename}"
-    outpath_light = f"{STATIC_DIR}/images/{filename_light}"
+    outpath = f"{STATIC_DIR}/images/{v.filename}"
 
-    # Run skill in isolated namespace — generate dark + light variants
+    # Run skill in isolated namespace
     ns = {}
     try:
         exec(open(SKILL_ARLEO_IMAGE).read(), ns)
         ns["generate"](v.style, v.title, v.subtitle, v.tags, v.accent or None,
-                       outpath_dark,  variant="dark")
-        ns["generate"](v.style, v.title, v.subtitle, v.tags, v.accent or None,
-                       outpath_light, variant="light")
+                       outpath)
     except Exception as e:
         log.error("generate_featured_image skill error: %s", e)
         raise HTTPException(500, f"Skill error: {e}")
 
-    for path in (outpath_dark, outpath_light):
-        if not os.path.exists(path):
-            raise HTTPException(500, f"Skill ran but file not created: {path}")
-        if os.path.getsize(path) == 0:
-            raise HTTPException(500, f"Skill produced empty file: {path}")
-    size_dark  = os.path.getsize(outpath_dark)
-    size_light = os.path.getsize(outpath_light)
+    if not os.path.exists(outpath):
+        raise HTTPException(500, f"Skill ran but file not created: {outpath}")
+    if os.path.getsize(outpath) == 0:
+        raise HTTPException(500, f"Skill produced empty file: {outpath}")
+    size_kb = os.path.getsize(outpath) // 1024
 
     frontmatter_updated = False
     langs_updated = []
@@ -497,8 +490,7 @@ async def tool_generate_featured_image(args):
             for key in ("featuredimage", "featuredImage", "FeaturedImage",
                         "featuredimagedark", "featuredImageDark", "FeaturedImageDark"):
                 fm.pop(key, None)
-            fm["featuredImage"]     = f"/images/{filename_light}"
-            fm["featuredImageDark"] = f"/images/{v.filename}"
+            fm["featuredImage"] = f"/images/{v.filename}"
             fm["lastmod"] = now_str
             write_page(page_path, fm, existing_content)
             langs_updated.append(lang or "default")
@@ -508,12 +500,9 @@ async def tool_generate_featured_image(args):
 
     return {
         "status":              "ok",
-        "filename_dark":       v.filename,
-        "filename_light":      filename_light,
-        "public_url_dark":     f"/images/{v.filename}",
-        "public_url_light":    f"/images/{filename_light}",
-        "size_bytes_dark":     size_dark,
-        "size_bytes_light":    size_light,
+        "filename":            v.filename,
+        "public_url":          f"/images/{v.filename}",
+        "size_kb":             size_kb,
         "style":               v.style,
         "frontmatter_updated": frontmatter_updated,
         "langs_updated":       langs_updated,
