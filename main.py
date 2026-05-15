@@ -451,41 +451,40 @@ async def tool_generate_featured_image(args):
     if v.accent and not re.fullmatch(r"#[0-9a-fA-F]{6}", v.accent):
         raise HTTPException(400, f"accent must be a 6-digit hex color like #7aa2f7, got {v.accent!r}")
 
-    outpath = f"{STATIC_DIR}/images/{v.filename}"
+    stem = v.filename[:-4]  # strip .png
+    filename_light = f"{stem}-light.png"
+    outpath_dark  = f"{STATIC_DIR}/images/{v.filename}"
+    outpath_light = f"{STATIC_DIR}/images/{filename_light}"
 
-    # Run skill in isolated namespace to avoid polluting module globals
+    # Run skill in isolated namespace — generate dark + light variants
     ns = {}
     try:
         exec(open(SKILL_ARLEO_IMAGE).read(), ns)
-        ns["generate"](
-            v.style,
-            v.title,
-            v.subtitle,
-            v.tags,
-            v.accent or None,
-            outpath,
-        )
+        ns["generate"](v.style, v.title, v.subtitle, v.tags, v.accent or None,
+                       outpath_dark,  variant="dark")
+        ns["generate"](v.style, v.title, v.subtitle, v.tags, v.accent or None,
+                       outpath_light, variant="light")
     except Exception as e:
         log.error("generate_featured_image skill error: %s", e)
         raise HTTPException(500, f"Skill error: {e}")
 
-    if not os.path.exists(outpath):
-        raise HTTPException(500, f"Skill ran but file not created: {outpath}")
-    size = os.path.getsize(outpath)
-    if size == 0:
-        raise HTTPException(500, "Skill produced empty file")
+    for path in (outpath_dark, outpath_light):
+        if not os.path.exists(path):
+            raise HTTPException(500, f"Skill ran but file not created: {path}")
+        if os.path.getsize(path) == 0:
+            raise HTTPException(500, f"Skill produced empty file: {path}")
+    size_dark  = os.path.getsize(outpath_dark)
+    size_light = os.path.getsize(outpath_light)
 
     frontmatter_updated = False
     langs_updated = []
     if v.route:
         route_safe = _safe_route(v.route)
-        # Find all language variants (fr + en)
         page_paths = []
         for lang in ("fr", "en"):
             p = find_page(route_safe, lang)
             if p:
                 page_paths.append((lang, p))
-        # Fallback: lang-neutral file
         if not page_paths:
             p = find_page(route_safe, None)
             if p:
@@ -495,11 +494,11 @@ async def tool_generate_featured_image(args):
         now_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%S+02:00")
         for lang, page_path in page_paths:
             fm, existing_content = read_frontmatter(page_path)
-            # BUG1: remove all case variants before setting
-            fm.pop("featuredimage", None)
-            fm.pop("featuredImage", None)
-            fm.pop("FeaturedImage", None)
-            fm["featuredImage"] = f"/images/{v.filename}"
+            for key in ("featuredimage", "featuredImage", "FeaturedImage",
+                        "featuredimagedark", "featuredImageDark", "FeaturedImageDark"):
+                fm.pop(key, None)
+            fm["featuredImage"]     = f"/images/{filename_light}"
+            fm["featuredImageDark"] = f"/images/{v.filename}"
             fm["lastmod"] = now_str
             write_page(page_path, fm, existing_content)
             langs_updated.append(lang or "default")
@@ -508,14 +507,17 @@ async def tool_generate_featured_image(args):
     deploy_output = run_deploy()
 
     return {
-        "status":               "ok",
-        "filename":             v.filename,
-        "public_url":           f"/images/{v.filename}",
-        "size_bytes":           size,
-        "style":                v.style,
-        "frontmatter_updated":  frontmatter_updated,
-        "langs_updated":        langs_updated,
-        "deploy":               deploy_output,
+        "status":              "ok",
+        "filename_dark":       v.filename,
+        "filename_light":      filename_light,
+        "public_url_dark":     f"/images/{v.filename}",
+        "public_url_light":    f"/images/{filename_light}",
+        "size_bytes_dark":     size_dark,
+        "size_bytes_light":    size_light,
+        "style":               v.style,
+        "frontmatter_updated": frontmatter_updated,
+        "langs_updated":       langs_updated,
+        "deploy":              deploy_output,
     }
 
 async def handle_list_tools(params):
