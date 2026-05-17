@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [2.1.0] — 2026-05-18
 
 ### Added
 - **Plugin audit events** — `HugoMcpPlugin.on_audit(audit_type, context)` hook (default no-op for backward compatibility) and `PluginRegistry.fire_audit_event()` dispatcher with a 10 min timeout. Lets plugins opt in to non-page events (scheduled checks, on-demand audits) by setting `handles_audit = True`. Existing plugins are unaffected.
@@ -8,6 +8,7 @@
 - **`sri-check` plugin** (`plugins/sri-check/`) — Wraps the standalone `check-sri-versions.sh` script via subprocess with `--json` mode. On successful auto-fix, fires a synthetic `updated` page event with `force_full_purge=True` so the Cloudflare plugin handles cache purge (rather than the script doing it inline) — fine-grained orchestration.
 
 ### Changed
+- **`generate_featured_image` MCP tool** — API change: now takes a `slug` argument (lowercase alphanumeric + hyphens) instead of `filename`. The filename is derived internally as `{slug}-featured.jpg`. Simpler for callers, prevents path-traversal attempts more strictly. **Breaking** if you previously called with `filename=...`.
 - **Cloudflare plugin** — Now honours `context.force_full_purge: True` to override `mode` and perform a full zone purge regardless of the configured mode. Used by the SRI auto-fix orchestration.
 - **`check-sri-versions.sh`** — Adds `--json`, `--no-autofix`, `--no-cf-purge`, `--dry-run` flags. The `--json` flag appends a `===JSON-REPORT===` marker followed by a single JSON object summarizing diagnostic + auto-fix + incident lifecycle.
 
@@ -159,3 +160,19 @@
 - Auth bearer token (`MCP_TOKEN`)
 - Support bilingue fr/en (hugo.toml LoveIt)
 - Service systemd `hugo-mcp.service`
+
+[2.1.0]: https://github.com/jmrGrav/hugo-mcp/compare/v2.0.0...v2.1.0
+[2.0.0]: https://github.com/jmrGrav/hugo-mcp/compare/v1.9.0...v2.0.0
+[1.9.0]: https://github.com/jmrGrav/hugo-mcp/compare/v1.8.1...v1.9.0
+[1.8.1]: https://github.com/jmrGrav/hugo-mcp/compare/v1.8.0...v1.8.1
+[1.8.0]: https://github.com/jmrGrav/hugo-mcp/compare/v1.7.0...v1.8.0
+[1.7.0]: https://github.com/jmrGrav/hugo-mcp/compare/v1.6.0...v1.7.0
+[1.6.0]: https://github.com/jmrGrav/hugo-mcp/compare/v1.4.0...v1.6.0
+[1.4.0]: https://github.com/jmrGrav/hugo-mcp/compare/v1.3.1...v1.4.0
+[1.3.1]: https://github.com/jmrGrav/hugo-mcp/compare/v1.3.0...v1.3.1
+[1.3.0]: https://github.com/jmrGrav/hugo-mcp/compare/v1.2.1...v1.3.0
+[1.2.1]: https://github.com/jmrGrav/hugo-mcp/compare/v1.2.0...v1.2.1
+[1.2.0]: https://github.com/jmrGrav/hugo-mcp/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/jmrGrav/hugo-mcp/compare/v1.0.1...v1.1.0
+[1.0.1]: https://github.com/jmrGrav/hugo-mcp/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/jmrGrav/hugo-mcp/releases/tag/v1.0.0

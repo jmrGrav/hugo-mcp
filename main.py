@@ -162,7 +162,7 @@ class GenerateFeaturedImageArgs(BaseModel):
     subtitle: str            = Field("", max_length=120)
     tags:     list[str]      = Field(default_factory=list)
     accent:   str            = Field("")
-    filename: str            = Field(..., min_length=1, max_length=255)
+    slug:     str            = Field(..., min_length=1, max_length=200)
     route:    Optional[str]  = Field(None, min_length=1, max_length=500)
     lang:     Optional[str]  = Field(None, pattern=r'^[a-z]{2,3}$')
 
@@ -442,11 +442,13 @@ async def tool_generate_featured_image(args):
     except ValidationError as e:
         raise HTTPException(400, f"Invalid arguments: {e}")
 
-    # Validate filename: no path traversal, must end with .jpg
-    if ".." in v.filename or "/" in v.filename or "\\" in v.filename:
-        raise HTTPException(400, "filename must not contain path separators or ..")
-    if not v.filename.lower().endswith(".jpg"):
-        raise HTTPException(400, "filename must end with .jpg")
+    # Validate slug: no path traversal, only safe chars (lowercase alphanumeric + hyphens)
+    if ".." in v.slug or "/" in v.slug or "\\" in v.slug:
+        raise HTTPException(400, "slug must not contain path separators or ..")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9\-]*", v.slug):
+        raise HTTPException(400, "slug must be lowercase alphanumeric + hyphens")
+
+    filename = f"{v.slug}-featured.jpg"
 
     # Validate style
     if v.style not in ("tech", "geo"):
@@ -456,7 +458,7 @@ async def tool_generate_featured_image(args):
     if v.accent and not re.fullmatch(r"#[0-9a-fA-F]{6}", v.accent):
         raise HTTPException(400, f"accent must be a 6-digit hex color like #7aa2f7, got {v.accent!r}")
 
-    outpath = f"{STATIC_DIR}/images/{v.filename}"
+    outpath = f"{STATIC_DIR}/images/{filename}"
 
     # Run skill in isolated namespace
     ns = {}
@@ -495,7 +497,7 @@ async def tool_generate_featured_image(args):
             for key in ("featuredimage", "featuredImage", "FeaturedImage",
                         "featuredimagedark", "featuredImageDark", "FeaturedImageDark"):
                 fm.pop(key, None)
-            fm["featuredImage"] = f"/images/{v.filename}"
+            fm["featuredImage"] = f"/images/{filename}"
             fm["lastmod"] = now_str
             write_page(page_path, fm, existing_content)
             langs_updated.append(lang or "default")
@@ -505,8 +507,8 @@ async def tool_generate_featured_image(args):
 
     return {
         "status":              "ok",
-        "filename":            v.filename,
-        "public_url":          f"/images/{v.filename}",
+        "filename":            filename,
+        "public_url":          f"/images/{filename}",
         "size_kb":             size_kb,
         "style":               v.style,
         "frontmatter_updated": frontmatter_updated,
@@ -673,14 +675,14 @@ async def handle_list_tools(params):
                                 "description": "Tags affichés sur l'image"},
                     "accent":   {"type": "string",
                                 "description": "Couleur accent hex optionnelle (#7aa2f7, #9ece6a, #f7768e, #e0af68, #bb9af7, #7dcfff)"},
-                    "filename": {"type": "string",
-                                "description": "Nom du fichier PNG de sortie ex: mon-article-featured.png"},
+                    "slug":     {"type": "string",
+                                "description": "Slug pour le filename de sortie (lowercase alphanumeric+hyphens). Le fichier final est {slug}-featured.jpg"},
                     "route":    {"type": "string",
                                 "description": "Route de la page à mettre à jour (ex: /posts/mon-article). Si fourni, met à jour featuredImage dans le frontmatter."},
                     "lang":     {"type": "string",
                                 "description": "Langue de la page (fr, en). Défaut: fr."},
                 },
-                "required": ["title", "filename"],
+                "required": ["title", "slug"],
             },
         },
     ]}
