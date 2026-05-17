@@ -170,6 +170,11 @@ class GenerateFeaturedImageArgs(BaseModel):
     @classmethod
     def _tags(cls, v): return _check_tags(v)
 
+
+class CheckSriVersionsArgs(BaseModel):
+    auto_fix: bool = Field(False, description="Apply minor/patch bumps (rebuild+deploy+CF purge orchestrated via plugins). Default False = diagnostic only.")
+    dry_run:  bool = Field(False, description="Skip side effects (no incident POST, no heartbeat). Implies auto_fix=False.")
+
 # ── Input validation ──────────────────────────────────────────────────────────
 
 def normalize_route(route: str) -> tuple[str, bool]:
@@ -642,6 +647,19 @@ async def handle_list_tools(params):
             },
         },
         {
+            "name":        "check_sri_versions",
+            "description": "Audit SRI hashes + npm versions of CDN libs used by the Hugo site. With auto_fix=true: bump minor/patch outdated libs, rebuild, deploy, orchestrate CF purge via plugins, resolve BetterStack incident.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "auto_fix": {"type": "boolean", "default": False,
+                                  "description": "Apply minor/patch bumps. Major bumps and hash mismatches always require manual review."},
+                    "dry_run":  {"type": "boolean", "default": False,
+                                  "description": "Diagnostic only ; skip incident POST and heartbeat ping. Implies auto_fix=False."},
+                },
+            },
+        },
+        {
             "name":        "generate_featured_image",
             "description": "Générer une featured image Tokyo Night pour un article arleo.eu via le skill arleo-image (sans base64)",
             "inputSchema": {
@@ -687,6 +705,7 @@ async def handle_tool_call(params, request=None):
         "list_assets": tool_list_assets,
         "upload_asset": tool_upload_asset,
         "generate_featured_image": tool_generate_featured_image,
+        "check_sri_versions":      tool_check_sri_versions,
     }
 
     tool = tools.get(tool_name)
@@ -965,6 +984,40 @@ async def tool_build_site(args):
               total_ms=int((t_purge-t0)*1000))
 
     return {"status": "built", "deploy": deploy_output, "cf_purge": cf_result}
+
+
+async def tool_check_sri_versions(args):
+    try:
+        v = CheckSriVersionsArgs.model_validate(args)
+    except ValidationError as e:
+        raise HTTPException(400, f"Invalid arguments: {e}")
+
+    auto_fix = v.auto_fix and not v.dry_run
+    context = {"auto_fix": auto_fix, "dry_run": v.dry_run}
+
+    t0 = time.perf_counter()
+    results = await _plugin_registry.fire_audit_event("sri_check", context)
+    duration_ms = int((time.perf_counter() - t0) * 1000)
+
+    slog.info("timing", op="check_sri_versions",
+              total_ms=duration_ms, auto_fix=auto_fix, dry_run=v.dry_run,
+              handlers=len(results))
+
+    if not results:
+        return {
+            "status": "no_handlers",
+            "message": "No plugin registered for audit_type=sri_check (check plugins.yaml).",
+            "duration_ms": duration_ms,
+        }
+
+    return {
+        "status": "ok",
+        "auto_fix": auto_fix,
+        "dry_run": v.dry_run,
+        "duration_ms": duration_ms,
+        "results": results,
+    }
+
 
 async def tool_upload_asset(args):
     try:

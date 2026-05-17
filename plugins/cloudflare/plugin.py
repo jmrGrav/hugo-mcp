@@ -55,7 +55,7 @@ class CloudflarePlugin(HugoMcpPlugin):
             logger.debug("plugin.cloudflare.noop", reason="no urls")
             return {"plugin": self.name, "success": True, "mode": mode, "noop": True}
 
-        use_full = mode == "full"
+        use_full = mode == "full" or bool(context.get("force_full_purge"))
 
         if mode == "smart" and event_type == "deleted":
             use_full = True

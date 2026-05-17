@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Plugin audit events** — `HugoMcpPlugin.on_audit(audit_type, context)` hook (default no-op for backward compatibility) and `PluginRegistry.fire_audit_event()` dispatcher with a 10 min timeout. Lets plugins opt in to non-page events (scheduled checks, on-demand audits) by setting `handles_audit = True`. Existing plugins are unaffected.
+- **`check_sri_versions` MCP tool** — Diagnoses SRI hashes (live re-check) and npm version freshness for CDN libs used by the Hugo site. Args: `auto_fix` (default `false`) and `dry_run` (default `false`).
+- **`sri-check` plugin** (`plugins/sri-check/`) — Wraps the standalone `check-sri-versions.sh` script via subprocess with `--json` mode. On successful auto-fix, fires a synthetic `updated` page event with `force_full_purge=True` so the Cloudflare plugin handles cache purge (rather than the script doing it inline) — fine-grained orchestration.
+
+### Changed
+- **Cloudflare plugin** — Now honours `context.force_full_purge: True` to override `mode` and perform a full zone purge regardless of the configured mode. Used by the SRI auto-fix orchestration.
+- **`check-sri-versions.sh`** — Adds `--json`, `--no-autofix`, `--no-cf-purge`, `--dry-run` flags. The `--json` flag appends a `===JSON-REPORT===` marker followed by a single JSON object summarizing diagnostic + auto-fix + incident lifecycle.
+
+### Notes
+- The weekly cron (`/home/jm/scripts/check-sri-versions.sh`, Mon 08:00) continues to run autonomously and is independent of the MCP. The MCP tool is an on-demand façade that reuses the same script logic.
+
 ## [1.9.0] — 2026-05-09
 
 ### Security
