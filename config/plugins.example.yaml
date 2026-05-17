@@ -29,3 +29,10 @@ cloudflare:
   - /posts/index.xml
   - /
   - /posts/
+sri_check:
+  enabled: true
+  script_path: /home/jm/scripts/check-sri-versions.sh
+  # If true (default), after a successful auto-fix the SRI plugin fires an
+  # "updated" page event with force_full_purge=true so the Cloudflare
+  # plugin handles cache purge — instead of the bash script doing it.
+  trigger_cf_purge_on_fix: true

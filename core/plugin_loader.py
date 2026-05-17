@@ -13,6 +13,7 @@ logger = structlog.get_logger(__name__)
 PLUGINS_DIR = Path(__file__).parent.parent / "plugins"
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "plugins.yaml"
 PLUGIN_TIMEOUT_SECONDS = 10
+AUDIT_TIMEOUT_SECONDS = 600
 
 
 class PluginRegistry:
@@ -47,6 +48,7 @@ class PluginRegistry:
             "plugins.loaded",
             active_count=len(self.active_plugins),
             plugins=[p.name for p in self.active_plugins],
+            audit_handlers=[p.name for p in self.active_plugins if getattr(p, "handles_audit", False)],
         )
 
     def _load_plugin(self, plugin_dir: Path, plugin_file: Path) -> None:
@@ -70,7 +72,7 @@ class PluginRegistry:
             return
 
         plugin = plugin_class()
-        plugin_config = self.config.get(plugin_name.replace("-", "_"), {})
+        plugin_config = self.config.get(plugin_name.replace('-', '_'), {})
 
         if not plugin.is_enabled(plugin_config):
             logger.info("plugins.disabled", plugin=plugin_name)
@@ -110,6 +112,29 @@ class PluginRegistry:
                 normalized.append(result)
         return normalized
 
+    async def fire_audit_event(self, audit_type: str, context: dict) -> list[dict]:
+        """
+        Dispatch an audit event to plugins that opt in via ``handles_audit = True``.
+        Audits are slower than page events (file IO, network calls, optional
+        rebuilds), hence a separate higher timeout.
+        """
+        audit_plugins = [p for p in self.active_plugins if getattr(p, "handles_audit", False)]
+        if not audit_plugins:
+            logger.info("plugins.audit_no_handlers", audit_type=audit_type)
+            return []
+
+        tasks = [self._call_audit_with_timeout(p, audit_type, context) for p in audit_plugins]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        normalized = []
+        for plugin, result in zip(audit_plugins, results):
+            if isinstance(result, Exception):
+                logger.error("plugins.audit_failed", plugin=plugin.name, error=str(result))
+                normalized.append({"plugin": plugin.name, "success": False, "error": str(result)})
+            else:
+                normalized.append(result)
+        return normalized
+
     async def _call_plugin_with_timeout(self, plugin, event_type, urls, context):
         try:
             return await asyncio.wait_for(
@@ -119,6 +144,16 @@ class PluginRegistry:
         except asyncio.TimeoutError:
             logger.warning("plugins.timeout", plugin=plugin.name)
             return {"plugin": plugin.name, "success": False, "error": "timeout"}
+
+    async def _call_audit_with_timeout(self, plugin, audit_type, context):
+        try:
+            return await asyncio.wait_for(
+                plugin.on_audit(audit_type, context),
+                timeout=AUDIT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("plugins.audit_timeout", plugin=plugin.name)
+            return {"plugin": plugin.name, "success": False, "error": "audit timeout"}
 
 
 registry = PluginRegistry()

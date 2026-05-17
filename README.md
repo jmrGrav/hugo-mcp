@@ -12,6 +12,10 @@ MCP server for Hugo static site management — `hugo-test.arleo.eu`.
 | `update_page` | Update page + rebuild + Cloudflare purge |
 | `delete_page` | Delete page + rebuild + full CF purge |
 | `build_site` | Rebuild Hugo + full CF purge |
+| `upload_asset` | Upload an image to `static/` |
+| `list_assets` | List static assets and page bundles |
+| `generate_featured_image` | Generate Tokyo Night featured image (dark+light) via `arleo-image` skill |
+| `check_sri_versions` | Audit SRI hashes + npm versions of CDN libs (diagnose / auto-fix minor/patch) |
 
 ## Setup
 
@@ -49,6 +53,27 @@ update_page(route="/posts/my-post", content="...",
 - Allowed value types: string, number, boolean, list, dict (or null on `update_page` only)
 - `date` is immutable on `update_page` — use original creation date
 - `date` and `lastmod` are auto-generated if absent from frontmatter
+
+## Audit plugins
+
+Plugins can opt in to **non-page events** by setting `handles_audit = True` and overriding `on_audit(audit_type, context)`. The registry exposes `fire_audit_event(audit_type, context)` which dispatches to all audit-handler plugins with a 10 min timeout (separate from the page-event timeout).
+
+### `sri-check` plugin (audit_type=`sri_check`)
+
+Audits Subresource Integrity hashes and npm version freshness for CDN libs (jsdelivr) referenced by the Hugo site. Wraps the standalone bash script `check-sri-versions.sh`.
+
+- **Diagnostic (default)** — re-fetch each pinned CDN URL, compute SHA-256, compare with stored hash ; query `https://data.jsdelivr.com/v1/packages/npm/<pkg>` for latest version ; classify outdated as `minor/patch` (auto-fixable) vs `major` (manual review). Hash mismatch is always WARN (security signal).
+- **Auto-fix (auto_fix=true)** — bumps minor/patch outdated libs in `assets/data/cdn/jsdelivr.yml` + `data/sri.yaml`, rebuilds Hugo with `--cleanDestinationDir`, deploys, fires an `updated` page event with `force_full_purge=True` so the Cloudflare plugin handles cache purge (fine-grained orchestration). Verifies live hashes ; rolls back on failure.
+- **Notification** — On WARN, the bash script POSTs a BetterStack incident and tracks the ID in `/home/jm/.config/sri-check.open-incidents` ; on next OK run, it auto-resolves any tracked incident.
+
+```yaml
+sri_check:
+  enabled: true
+  script_path: /home/jm/scripts/check-sri-versions.sh
+  trigger_cf_purge_on_fix: true
+```
+
+The weekly cron continues to run independently of the MCP, so audits keep happening even if the MCP is down. The MCP tool is an on-demand façade.
 
 ## Architecture
 
